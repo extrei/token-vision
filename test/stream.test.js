@@ -101,7 +101,7 @@ test('buildSnapshot: full codex without rate limits omits the optional keys enti
  * Returns the parsed NDJSON lines plus captured stderr for diagnostics.
  */
 async function collectStream(args, { env = {}, collectMs = 1200 } = {}) {
-  const child = spawn(process.execPath, ['src/live-usage.js', '--stream', ...args], {
+  const child = spawn(process.execPath, ['src/live-usage.js', '--stream', '--no-claude-limits', ...args], {
     cwd: ROOT,
     env: { ...process.env, ...env },
     stdio: ['ignore', 'pipe', 'pipe'],

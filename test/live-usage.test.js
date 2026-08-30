@@ -35,7 +35,7 @@ test('createLiveState: scanClaude counts extracted entries pre-dedupe; claudeFra
 test('CLI --once --no-codex renders the claude block and omits the CODEX section', async () => {
   const { stdout } = await execFileP(
     process.execPath,
-    ['src/live-usage.js', '--once', '--no-codex', '--claude-dir', FIXTURE],
+    ['src/live-usage.js', '--once', '--no-codex', '--no-claude-limits', '--claude-dir', FIXTURE],
     { cwd: ROOT, timeout: 30_000 },
   );
   assert.ok(stdout.includes('CLAUDE CODE'));
@@ -52,6 +52,7 @@ test('CLI --once with mock codex shows codex usage and no rate-limit line', asyn
     [
       'src/live-usage.js',
       '--once',
+      '--no-claude-limits',
       '--claude-dir',
       FIXTURE,
       '--codex-cmd',

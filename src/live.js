@@ -183,6 +183,7 @@ export function buildSnapshot({ now = new Date(), claude, codex }) {
       today: claude.today,
       lifetime: claude.summary?.lifetimeTokens ?? 0,
       messages: claude.summary?.assistantMessages ?? 0,
+      ...(claude.limits?.windows?.length && { limits: claude.limits.windows }),
     };
   }
   if (codex !== undefined) {
@@ -233,6 +234,14 @@ export function renderFrame(state) {
     lines.push(row('rate', `${fmt(claude.perMinute)} tok/min ${D}(last 60s)${R}   ${fmt(claude.perFiveMinutes)} ${D}in last 5m${R}`));
     lines.push(row('lifetime', `${fmt(s.lifetimeTokens)}   ${D}messages${R} ${fmt(s.assistantMessages)}`));
     lines.push(row(`last ${days}d`, `${sparkline(claude.daily)}  ${D}peak ${compact(s.peakDailyTokens)}/day${R}`));
+    if (claude.limits?.windows) {
+      for (const w of claude.limits.windows) {
+        const line = limitLine(w.name, { usedPercent: w.usedPercent, resetsAt: w.resetsAt }, now, { ansi });
+        if (line) lines.push(line);
+      }
+    } else if (claude.limits?.error) {
+      lines.push(row('limits', `${D}unavailable: ${claude.limits.error}${R}`));
+    }
     lines.push('');
   }
 

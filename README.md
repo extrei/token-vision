@@ -33,7 +33,11 @@ Reads `<claude-dir>/projects/**/*.jsonl` (default `$CLAUDE_CONFIG_DIR` or
 (lifetime/peak tokens, streaks, plus input/output/cache splits), UTC-bucketed
 `dailyUsageBuckets`, and a per-model breakdown. Duplicated transcript lines
 (resumed/forked sessions) are deduplicated by message id + request id;
-synthetic error placeholders are skipped. Caveats: local machine only, and the
+synthetic error placeholders are skipped. The dedupe matters: transcripts
+rewrite the same API response up to a dozen times with byte-identical usage,
+so tools that skip dedupe report roughly double the true lifetime total
+(verified: first/last/max-occurrence strategies all agree here, while the
+no-dedupe sum matches the inflated figure). Caveats: local machine only, and the
 transcript format is internal to Claude Code and may change between versions.
 
 ## Protocol
@@ -87,6 +91,15 @@ buffering) for a live tokens-per-minute rate, and polls the Codex app-server for
 account usage plus `account/rateLimits/read` utilization (colored bar, reset
 time). Sparklines show the last N days per agent. Codex being unavailable or
 unauthenticated degrades to a note; the Claude side keeps running.
+
+**Claude plan limits**: the live views also show the `/usage`-style plan
+windows (session / weekly / weekly opus utilization with reset times), fetched
+the way Claude Code itself does — the OAuth usage endpoint
+(`api.anthropic.com/api/oauth/usage`) with the token from
+`$CLAUDE_CODE_OAUTH_TOKEN`, `~/.claude/.credentials.json`, or the macOS
+Keychain. This endpoint is not officially documented, so it degrades to a
+dim "limits unavailable" note on any failure; `--no-claude-limits` disables
+the fetch entirely and `--claude-limits-interval` tunes the poll (default 60s).
 
 **Codex "today" estimate**: the backend's `dailyUsageBuckets` lag behind and
 usually stop at yesterday, so live views fill today's bucket from the local

@@ -4,6 +4,7 @@ import { summarize } from './claude-usage.js';
 import { AppServerClient } from './app-server-client.js';
 import { TranscriptTailer, RateWindow, renderFrame, buildSnapshot, lastNDays, todayTokens } from './live.js';
 import { CodexSessionScanner, localTodayTokens, overlayToday } from './codex-local.js';
+import { readClaudeLimits } from './claude-limits.js';
 
 /**
  * Live terminal view of token usage: Claude Code transcripts are tailed
@@ -77,6 +78,8 @@ async function main() {
       interval: { type: 'string', default: '2' },
       'codex-interval': { type: 'string', default: '30' },
       'no-codex': { type: 'boolean', default: false },
+      'no-claude-limits': { type: 'boolean', default: false },
+      'claude-limits-interval': { type: 'string', default: '60' },
       'claude-dir': { type: 'string' },
       days: { type: 'string', default: '14' },
       once: { type: 'boolean', default: false },
@@ -96,6 +99,8 @@ Options:
   --interval <s>        Claude transcript scan interval (default: 2)
   --codex-interval <s>  Codex app-server poll interval (default: 30)
   --no-codex            Claude transcripts only
+  --no-claude-limits    Skip the Claude plan-limit fetch (OAuth usage endpoint)
+  --claude-limits-interval <s>  Claude limit poll interval (default: 60)
   --claude-dir <dir>    Claude config dir (default: $CLAUDE_CONFIG_DIR or ~/.claude)
   --days <n>            Days in the sparklines (default: 14)
   --once                Render a single frame and exit
@@ -141,10 +146,24 @@ Options:
     }
   };
 
+  let claudeLimits = null;
+  const refreshClaudeLimits = async () => {
+    if (values['no-claude-limits']) return;
+    try {
+      claudeLimits = await readClaudeLimits();
+    } catch (err) {
+      claudeLimits = { error: err.message };
+    }
+  };
+
+  const claudeState = () => ({
+    ...state.claudeFrame(),
+    ...(claudeLimits && { limits: claudeLimits }),
+  });
   const frame = () =>
     renderFrame({
       now: new Date(),
-      claude: state.claudeFrame(),
+      claude: claudeState(),
       codex: values['no-codex'] ? undefined : codex,
       ansi,
       days,
@@ -154,7 +173,7 @@ Options:
     });
 
   await state.scanClaude();
-  await refreshCodex();
+  await Promise.all([refreshCodex(), refreshClaudeLimits()]);
 
   if (values.once) {
     console.log(frame());
@@ -168,7 +187,7 @@ Options:
         JSON.stringify(
           buildSnapshot({
             now: new Date(),
-            claude: state.claudeFrame(),
+            claude: claudeState(),
             codex: values['no-codex'] ? undefined : codex,
           }),
         ),
@@ -179,9 +198,14 @@ Options:
       emit();
     }, Number(values.interval) * 1000);
     const streamCodexTimer = setInterval(refreshCodex, Number(values['codex-interval']) * 1000);
+    const streamLimitsTimer = setInterval(
+      refreshClaudeLimits,
+      Number(values['claude-limits-interval']) * 1000,
+    );
     const stop = async () => {
       clearInterval(streamTimer);
       clearInterval(streamCodexTimer);
+      clearInterval(streamLimitsTimer);
       await client?.close();
       process.exit(0);
     };
@@ -199,10 +223,15 @@ Options:
     paint();
   }, Number(values.interval) * 1000);
   const codexTimer = setInterval(refreshCodex, Number(values['codex-interval']) * 1000);
+  const limitsTimer = setInterval(
+    refreshClaudeLimits,
+    Number(values['claude-limits-interval']) * 1000,
+  );
 
   const shutdown = async () => {
     clearInterval(claudeTimer);
     clearInterval(codexTimer);
+    clearInterval(limitsTimer);
     process.stdout.write('\x1b[?25h\n');
     await client?.close();
     process.exit(0);

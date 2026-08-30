@@ -28,12 +28,22 @@ func resetLabel(_ epoch: Double) -> String {
     return f.string(from: d)
 }
 
+func resetLabelAny(_ value: Any?) -> String? {
+    if let epoch = num(value) { return resetLabel(epoch) }
+    if let iso = value as? String {
+        let f = ISO8601DateFormatter()
+        if let d = f.date(from: iso) { return resetLabel(d.timeIntervalSince1970) }
+    }
+    return nil
+}
+
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     let claudeRate = NSMenuItem(title: "starting…", action: nil, keyEquivalent: "")
     let claudeTotals = NSMenuItem(title: "", action: nil, keyEquivalent: "")
     let codexTotals = NSMenuItem(title: "waiting for first poll…", action: nil, keyEquivalent: "")
     let codexLimit = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+    var claudeLimitItems: [NSMenuItem] = []
     var proc: Process?
     var buffer = Data()
     var quitting = false
@@ -133,28 +143,54 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 : "rate  idle"
             claudeTotals.title =
                 "today \(compact(num(claude["today"]) ?? 0)) · lifetime \(compact(num(claude["lifetime"]) ?? 0))"
+            updateClaudeLimits(claude["limits"] as? [[String: Any]] ?? [])
+            let maxUsed = (claude["limits"] as? [[String: Any]] ?? [])
+                .compactMap { num($0["usedPercent"]) }.max() ?? 0
+            if maxUsed >= 60 { title += " · C \(Int(maxUsed))%" }
         }
-        if let codex = snapshot["codex"] as? [String: Any] {
-            if codex["pending"] != nil {
-                codexTotals.title = "waiting for first poll…"
-                codexLimit.title = ""
-            } else if let error = codex["error"] as? String {
-                codexTotals.title = "unavailable: \(error)"
-                codexLimit.title = ""
-            } else {
-                let estimate = (codex["todayEstimated"] as? Bool) == true ? "~" : ""
-                codexTotals.title =
-                    "today \(estimate)\(compact(num(codex["today"]) ?? 0)) · lifetime \(compact(num(codex["lifetime"]) ?? 0))"
-                if let used = num(codex["usedPercent"]) {
-                    let plan = codex["planType"] as? String ?? "plan"
-                    var line = "\(plan) limit \(Int(used))%"
-                    if let resetsAt = num(codex["resetsAt"]) { line += " · resets \(resetLabel(resetsAt))" }
-                    codexLimit.title = line
-                    if used >= 60 { title += " · \(Int(used))%" }
-                }
+        title += applyCodex(snapshot)
+        setTitle(title)
+    }
+
+    func updateClaudeLimits(_ limits: [[String: Any]]) {
+        guard let menu = item.menu else { return }
+        for old in claudeLimitItems { menu.removeItem(old) }
+        claudeLimitItems = []
+        let anchor = menu.index(of: claudeTotals) + 1
+        for (i, w) in limits.enumerated() {
+            let name = w["name"] as? String ?? "limit"
+            var text = "\(name) \(Int(num(w["usedPercent"]) ?? 0))%"
+            if let reset = resetLabelAny(w["resetsAt"]) { text += " · resets \(reset)" }
+            let row = NSMenuItem(title: text, action: nil, keyEquivalent: "")
+            row.isEnabled = false
+            menu.insertItem(row, at: anchor + i)
+            claudeLimitItems.append(row)
+        }
+    }
+
+    /// Updates the codex menu rows; returns a title suffix like " · X 72%"
+    /// when the codex limit is running hot.
+    func applyCodex(_ snapshot: [String: Any]) -> String {
+        guard let codex = snapshot["codex"] as? [String: Any] else { return "" }
+        if codex["pending"] != nil {
+            codexTotals.title = "waiting for first poll…"
+            codexLimit.title = ""
+        } else if let error = codex["error"] as? String {
+            codexTotals.title = "unavailable: \(error)"
+            codexLimit.title = ""
+        } else {
+            let estimate = (codex["todayEstimated"] as? Bool) == true ? "~" : ""
+            codexTotals.title =
+                "today \(estimate)\(compact(num(codex["today"]) ?? 0)) · lifetime \(compact(num(codex["lifetime"]) ?? 0))"
+            if let used = num(codex["usedPercent"]) {
+                let plan = codex["planType"] as? String ?? "plan"
+                var line = "\(plan) limit \(Int(used))%"
+                if let resetsAt = num(codex["resetsAt"]) { line += " · resets \(resetLabel(resetsAt))" }
+                codexLimit.title = line
+                if used >= 60 { return " · X \(Int(used))%" }
             }
         }
-        setTitle(title)
+        return ""
     }
 }
 

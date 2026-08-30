@@ -26,7 +26,7 @@ const totalTokens = (t) => t.input + t.output + t.cacheCreation + t.cacheRead;
  * not an assistant message with real token usage.
  * Entry: { key, date, model, tokens: {input, output, cacheCreation, cacheRead} }
  */
-export function extractUsageEntry(line) {
+export function extractUsageEntry(line, { timestamps = false } = {}) {
   // Cheap pre-filter before JSON.parse — transcripts are large.
   if (!line.includes('"assistant"') || !line.includes('"usage"')) return null;
   let d;
@@ -54,6 +54,7 @@ export function extractUsageEntry(line) {
     date: d.timestamp.slice(0, 10),
     model: msg.model ?? 'unknown',
     tokens,
+    ...(timestamps && { timestampMs: Date.parse(d.timestamp) }),
   };
 }
 

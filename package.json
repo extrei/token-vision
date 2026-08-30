@@ -8,6 +8,7 @@
   },
   "scripts": {
     "start": "node src/read-usage.js",
+    "live": "node src/live-usage.js",
     "test": "node --test \"test/**/*.test.js\""
   },
   "engines": {

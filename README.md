@@ -73,6 +73,21 @@ The response shape (from `codex app-server generate-json-schema`):
 }
 ```
 
+### Live terminal view
+
+```sh
+npm run live                       # repaints in place; ctrl-c to quit
+node src/live-usage.js --interval 2 --codex-interval 30 --days 14
+node src/live-usage.js --once      # single frame, no screen control
+node src/live-usage.js --no-codex  # Claude transcripts only
+```
+
+Tails the Claude transcripts incrementally (per-file byte offsets, partial-line
+buffering) for a live tokens-per-minute rate, and polls the Codex app-server for
+account usage plus `account/rateLimits/read` utilization (colored bar, reset
+time). Sparklines show the last N days per agent. Codex being unavailable or
+unauthenticated degrades to a note; the Claude side keeps running.
+
 ## Tests
 
 ```sh

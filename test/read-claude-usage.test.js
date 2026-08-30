@@ -97,13 +97,13 @@ test('CLI --json --claude-dir prints the fixture report as JSON', async () => {
   const report = JSON.parse(stdout);
   // The CLI runs with the real clock, so only assert now-independent fields
   // (streaks depend on today's date).
-  assert.equal(report.summary.lifetimeTokens, 12530);
+  assert.equal(report.summary.lifetimeTokens, 17530);
   assert.equal(report.summary.peakDailyTokens, 10000);
-  assert.equal(report.summary.inputTokens, 1466);
-  assert.equal(report.summary.outputTokens, 4799);
-  assert.equal(report.summary.cacheCreationTokens, 2577);
-  assert.equal(report.summary.cacheReadTokens, 3688);
-  assert.equal(report.summary.assistantMessages, 8);
+  assert.equal(report.summary.inputTokens, 2466);
+  assert.equal(report.summary.outputTokens, 5799);
+  assert.equal(report.summary.cacheCreationTokens, 3577);
+  assert.equal(report.summary.cacheReadTokens, 5688);
+  assert.equal(report.summary.assistantMessages, 9);
   assert.equal(report.summary.firstActivity, '2026-08-20');
   assert.equal(report.summary.lastActivity, '2026-08-29');
   assert.deepEqual(report.dailyUsageBuckets, [
@@ -113,11 +113,11 @@ test('CLI --json --claude-dir prints the fixture report as JSON', async () => {
     { startDate: '2026-08-23', tokens: 20 },
     { startDate: '2026-08-24', tokens: 200 },
     { startDate: '2026-08-27', tokens: 10000 },
-    { startDate: '2026-08-28', tokens: 400 },
+    { startDate: '2026-08-28', tokens: 5400 },
     { startDate: '2026-08-29', tokens: 800 },
   ]);
   assert.deepEqual(report.modelBreakdown, [
     { model: 'claude-opus-5', tokens: 11300, messages: 4 },
-    { model: 'claude-sonnet-5', tokens: 1230, messages: 4 },
+    { model: 'claude-sonnet-5', tokens: 6230, messages: 5 },
   ]);
 });

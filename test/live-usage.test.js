@@ -13,17 +13,18 @@ const NOW = () => new Date('2026-08-30T12:00:00Z');
 test('createLiveState: scanClaude counts extracted entries pre-dedupe; claudeFrame aggregates', async () => {
   const state = createLiveState({ claudeDir: new URL(`../${FIXTURE}`, import.meta.url).pathname, now: NOW });
 
-  // The fixture holds 8 countable API responses plus one cross-file duplicate
-  // transcript line (same message id + request id). scanClaude() reports raw
-  // extracted entries — dedupe happens later in summarize() — so it returns 9.
-  assert.equal(await state.scanClaude(), 9);
+  // The fixture holds 9 countable API responses (one in a nested subagents
+  // transcript) plus one cross-file duplicate transcript line (same message id
+  // + request id). scanClaude() reports raw extracted entries — dedupe happens
+  // later in summarize() — so it returns 10.
+  assert.equal(await state.scanClaude(), 10);
 
   const frame = state.claudeFrame();
-  assert.equal(frame.summary.lifetimeTokens, 12530); // deduped
-  assert.equal(frame.summary.assistantMessages, 8);
+  assert.equal(frame.summary.lifetimeTokens, 17530); // deduped
+  assert.equal(frame.summary.assistantMessages, 9);
   assert.equal(frame.today, 0); // no 2026-08-30 bucket
   // Dense last-14-days window ending at NOW (2026-08-17 … 2026-08-30).
-  assert.deepEqual(frame.daily, [0, 0, 0, 1000, 100, 10, 20, 200, 0, 0, 10000, 400, 800, 0]);
+  assert.deepEqual(frame.daily, [0, 0, 0, 1000, 100, 10, 20, 200, 0, 0, 10000, 5400, 800, 0]);
   // All fixture timestamps are far older than the rate window.
   assert.equal(frame.perMinute, 0);
   assert.equal(frame.perFiveMinutes, 0);
@@ -39,7 +40,7 @@ test('CLI --once --no-codex renders the claude block and omits the CODEX section
     { cwd: ROOT, timeout: 30_000 },
   );
   assert.ok(stdout.includes('CLAUDE CODE'));
-  assert.ok(stdout.includes('12,530'));
+  assert.ok(stdout.includes('17,530'));
   assert.ok(!stdout.includes('CODEX'));
   assert.ok(!stdout.includes('waiting for first poll'));
   assert.ok(!stdout.includes('ctrl-c to quit')); // --once renders no intervals line
@@ -65,7 +66,7 @@ test('CLI --once with mock codex shows codex usage and no rate-limit line', asyn
     { cwd: ROOT, timeout: 30_000, env: { ...process.env, MOCK_MODE: 'happy' } },
   );
   assert.ok(stdout.includes('CLAUDE CODE'));
-  assert.ok(stdout.includes('12,530')); // claude lifetime
+  assert.ok(stdout.includes('17,530')); // claude lifetime
   assert.ok(stdout.includes('12,345,678')); // mock codex lifetime
   assert.ok(stdout.includes('streak 5d')); // mock currentStreakDays
   assert.ok(!stdout.includes('waiting for first poll'));

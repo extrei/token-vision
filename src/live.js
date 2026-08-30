@@ -1,5 +1,5 @@
 import { open, readdir, stat } from 'node:fs/promises';
-import { join } from 'node:path';
+import { join, sep } from 'node:path';
 import { extractUsageEntry, defaultClaudeDir } from './claude-usage.js';
 
 /**
@@ -17,25 +17,15 @@ export class TranscriptTailer {
   }
 
   async #files() {
-    const out = [];
-    let projects;
+    // Recursive: includes nested subagent transcripts
+    // (<project>/<session>/subagents/*.jsonl), which carry their own usage.
     try {
-      projects = await readdir(this.projectsDir);
+      return (await readdir(this.projectsDir, { recursive: true }))
+        .filter((f) => f.endsWith('.jsonl') && f.includes(sep))
+        .map((f) => join(this.projectsDir, f));
     } catch {
-      return out;
+      return [];
     }
-    for (const project of projects) {
-      const dir = join(this.projectsDir, project);
-      try {
-        if (!(await stat(dir)).isDirectory()) continue;
-        for (const f of await readdir(dir)) {
-          if (f.endsWith('.jsonl')) out.push(join(dir, f));
-        }
-      } catch {
-        /* raced with deletion */
-      }
-    }
-    return out;
   }
 
   async scan() {

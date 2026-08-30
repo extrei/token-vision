@@ -31,13 +31,14 @@ node src/read-claude-usage.js --claude-dir /path/to/.claude --days 30
 Reads `<claude-dir>/projects/**/*.jsonl` (default `$CLAUDE_CONFIG_DIR` or
 `~/.claude`) and produces the same shape as the Codex response: `summary`
 (lifetime/peak tokens, streaks, plus input/output/cache splits), UTC-bucketed
-`dailyUsageBuckets`, and a per-model breakdown. Duplicated transcript lines
-(resumed/forked sessions) are deduplicated by message id + request id;
-synthetic error placeholders are skipped. The dedupe matters: transcripts
-rewrite the same API response up to a dozen times with byte-identical usage,
-so tools that skip dedupe report roughly double the true lifetime total
-(verified: first/last/max-occurrence strategies all agree here, while the
-no-dedupe sum matches the inflated figure). Caveats: local machine only, and the
+`dailyUsageBuckets`, and a per-model breakdown. The scan is recursive: besides the session
+transcripts one level down, subagent transcripts nest deeper
+(`<project>/<session-id>/subagents/agent-*.jsonl`) and carry their own API
+usage — on an agent-heavy setup they hold roughly as many tokens as the main
+sessions, so skipping them undercounts lifetime by about half. Duplicated
+transcript lines (resumed/forked sessions rewrite the same API response up to
+a dozen times with byte-identical usage) are deduplicated by message id +
+request id; synthetic error placeholders are skipped. Caveats: local machine only, and the
 transcript format is internal to Claude Code and may change between versions.
 
 ## Protocol

@@ -1,6 +1,6 @@
 import { createReadStream } from 'node:fs';
-import { readdir, stat } from 'node:fs/promises';
-import { join } from 'node:path';
+import { readdir } from 'node:fs/promises';
+import { join, sep } from 'node:path';
 import { homedir } from 'node:os';
 import { createInterface } from 'node:readline';
 
@@ -125,24 +125,19 @@ export function summarize(entries, { now = new Date() } = {}) {
 }
 
 async function* transcriptFiles(projectsDir) {
-  let projects;
+  // Recursive: session transcripts sit at projects/<project>/<session>.jsonl,
+  // but subagent transcripts nest deeper (<project>/<session>/subagents/*.jsonl)
+  // and carry their own API usage — skipping them undercounts by ~half.
+  let names;
   try {
-    projects = await readdir(projectsDir);
+    names = await readdir(projectsDir, { recursive: true });
   } catch {
     return; // no projects dir — treated as zero usage
   }
-  for (const project of projects) {
-    const dir = join(projectsDir, project);
-    let files;
-    try {
-      if (!(await stat(dir)).isDirectory()) continue;
-      files = await readdir(dir);
-    } catch {
-      continue;
-    }
-    for (const f of files) {
-      if (f.endsWith('.jsonl')) yield join(dir, f);
-    }
+  for (const name of names) {
+    // Depth >= 1 only: real transcripts always live inside a project dir;
+    // a stray .jsonl directly under projects/ is foreign.
+    if (name.endsWith('.jsonl') && name.includes(sep)) yield join(projectsDir, name);
   }
 }
 

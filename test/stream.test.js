@@ -142,7 +142,7 @@ test('CLI --stream --no-codex emits parseable snapshots with claude data and no 
     assert.ok(!Number.isNaN(Date.parse(snap.ts)));
   }
   const first = lines[0];
-  assert.equal(first.claude.lifetime, 12530);
+  assert.equal(first.claude.lifetime, 17530);
   assert.ok(!('codex' in first));
 });
 

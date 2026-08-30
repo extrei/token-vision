@@ -1,0 +1,1 @@
+{"type":"assistant","uuid":"u-agent-x","requestId":"req_agent_x","timestamp":"2026-08-28T13:00:00.000Z","message":{"id":"msg_agent_x","model":"claude-sonnet-5","usage":{"input_tokens":1000,"cache_creation_input_tokens":1000,"cache_read_input_tokens":2000,"output_tokens":1000}}}

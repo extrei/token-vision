@@ -111,6 +111,39 @@ test('TranscriptTailer: a new file is picked up on the next scan', async (t) => 
   assert.deepEqual(new Set(fresh.map((e) => e.key)), new Set(['msg_b:req_b', 'msg_c:req_c']));
 });
 
+test('TranscriptTailer: nested subagent transcripts are found by the first AND later scans; depth-0 strays are not', async (t) => {
+  // Regression guard: scanning was once one-level-deep and silently missed
+  // projects/<project>/<session>/subagents/agent-*.jsonl transcripts.
+  const dir = await tempClaudeDir(t);
+  const subagentsDir = join(dir, 'projects', 'p1', 'sess1', 'subagents');
+  await mkdir(subagentsDir, { recursive: true });
+  await writeFile(
+    join(subagentsDir, 'agent-y.jsonl'),
+    transcriptLine('y', '2026-08-29T10:00:00.000Z', 100),
+  );
+  // Stray depth-0 file directly under projects/ must stay excluded.
+  await writeFile(
+    join(dir, 'projects', 'orphan2.jsonl'),
+    transcriptLine('orphan2', '2026-08-29T10:30:00.000Z', 999),
+  );
+
+  const tailer = new TranscriptTailer({ claudeDir: dir });
+  const initial = await tailer.scan();
+  assert.deepEqual(initial.map((e) => e.key), ['msg_y:req_y']);
+
+  // A nested subagent file created AFTER the first scan is picked up too.
+  await writeFile(
+    join(subagentsDir, 'agent-z.jsonl'),
+    transcriptLine('z', '2026-08-29T11:00:00.000Z', 200),
+  );
+  const later = await tailer.scan();
+  assert.deepEqual(later.map((e) => e.key), ['msg_z:req_z']);
+
+  // Neither scan ever surfaced the depth-0 stray.
+  assert.ok(![...initial, ...later].some((e) => e.key === 'msg_orphan2:req_orphan2'));
+  assert.deepEqual(await tailer.scan(), []);
+});
+
 test('TranscriptTailer: partial trailing line is buffered until completed, then returned once', async (t) => {
   const dir = await tempClaudeDir(t);
   const file = join(dir, 'projects', 'p1', 's1.jsonl');

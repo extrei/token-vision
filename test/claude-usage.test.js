@@ -221,6 +221,8 @@ test('summarize of no entries reports zero lifetime tokens and null peak/streaks
 //   msg_f   08-27 opus    1000+4000+2000+3000 = 10,000
 //   msg_g   08-28 sonnet  100+100+100+100     =   400
 //   msg_h   08-29 sonnet  200+200+200+200     =   800
+//   msg_agent_x 08-28 sonnet 1000+1000+1000+2000 = 5,000
+//     (nested subagent transcript at proj-a/some-session-id/subagents/agent-x.jsonl)
 // Rejected: synthetic, all-zero, malformed JSON, user line, notes.txt,
 // and projects/orphan.jsonl (plain file, not inside a project dir).
 
@@ -228,15 +230,15 @@ test('readClaudeUsage aggregates the fixture dir exactly', async () => {
   const report = await readClaudeUsage({ claudeDir: FIXTURE_DIR, now: NOW });
   assert.deepEqual(report, {
     summary: {
-      lifetimeTokens: 12530,
+      lifetimeTokens: 17530,
       peakDailyTokens: 10000,
       currentStreakDays: 3,
       longestStreakDays: 5,
-      inputTokens: 1466,
-      outputTokens: 4799,
-      cacheCreationTokens: 2577,
-      cacheReadTokens: 3688,
-      assistantMessages: 8,
+      inputTokens: 2466,
+      outputTokens: 5799,
+      cacheCreationTokens: 3577,
+      cacheReadTokens: 5688,
+      assistantMessages: 9,
       firstActivity: '2026-08-20',
       lastActivity: '2026-08-29',
     },
@@ -247,14 +249,24 @@ test('readClaudeUsage aggregates the fixture dir exactly', async () => {
       { startDate: '2026-08-23', tokens: 20 },
       { startDate: '2026-08-24', tokens: 200 },
       { startDate: '2026-08-27', tokens: 10000 },
-      { startDate: '2026-08-28', tokens: 400 },
+      { startDate: '2026-08-28', tokens: 5400 },
       { startDate: '2026-08-29', tokens: 800 },
     ],
     modelBreakdown: [
       { model: 'claude-opus-5', tokens: 11300, messages: 4 },
-      { model: 'claude-sonnet-5', tokens: 1230, messages: 4 },
+      { model: 'claude-sonnet-5', tokens: 6230, messages: 5 },
     ],
   });
+});
+
+test('readClaudeUsage picks up nested subagent transcripts (proj-a/some-session-id/subagents/agent-x.jsonl)', async () => {
+  // Regression guard: transcript scanning was once one-level-deep and silently
+  // missed projects/<project>/<session>/subagents/agent-*.jsonl files. The
+  // nested fixture holds a single 5,000-token 08-28 message; the flat fixture
+  // files contribute 400 to that day, so 5,400 proves the nested file counted.
+  const report = await readClaudeUsage({ claudeDir: FIXTURE_DIR, now: NOW });
+  const bucket = report.dailyUsageBuckets.find((b) => b.startDate === '2026-08-28');
+  assert.deepEqual(bucket, { startDate: '2026-08-28', tokens: 5400 });
 });
 
 test('readClaudeUsage on a nonexistent claudeDir yields a zero-usage report without throwing', async () => {

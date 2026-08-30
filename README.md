@@ -88,6 +88,16 @@ account usage plus `account/rateLimits/read` utilization (colored bar, reset
 time). Sparklines show the last N days per agent. Codex being unavailable or
 unauthenticated degrades to a note; the Claude side keeps running.
 
+**Codex "today" estimate**: the backend's `dailyUsageBuckets` lag behind and
+usually stop at yesterday, so live views fill today's bucket from the local
+session rollouts (`$CODEX_HOME/sessions/YYYY/MM/DD/rollout-*.jsonl`, summing
+`token_count` events' `last_token_usage.total_tokens` by event timestamp, with
+a 7-day directory lookback for long-running sessions). The shown value is
+`max(api, local)` and marked `~ (local estimate)` when the local floor wins —
+local rollouts can't see usage from other devices or cloud tasks (validated at
+95–97% of the API's figure for same-machine days). `--codex-home` overrides
+the rollout location.
+
 ### Menu-bar widget (macOS)
 
 ```sh

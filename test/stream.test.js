@@ -153,6 +153,7 @@ test('CLI --stream with mock codex includes codex usage but no usedPercent', asy
       '--claude-dir', FIXTURE,
       '--codex-cmd', process.execPath,
       '--codex-args', 'test/fixtures/mock-app-server.js',
+      '--codex-home', 'test/fixtures/no-such-codex-home',
     ],
     { env: { MOCK_MODE: 'happy' }, collectMs: 1400 },
   );

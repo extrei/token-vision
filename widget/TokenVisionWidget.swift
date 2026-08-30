@@ -142,8 +142,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 codexTotals.title = "unavailable: \(error)"
                 codexLimit.title = ""
             } else {
+                let estimate = (codex["todayEstimated"] as? Bool) == true ? "~" : ""
                 codexTotals.title =
-                    "today \(compact(num(codex["today"]) ?? 0)) · lifetime \(compact(num(codex["lifetime"]) ?? 0))"
+                    "today \(estimate)\(compact(num(codex["today"]) ?? 0)) · lifetime \(compact(num(codex["lifetime"]) ?? 0))"
                 if let used = num(codex["usedPercent"]) {
                     let plan = codex["planType"] as? String ?? "plan"
                     var line = "\(plan) limit \(Int(used))%"

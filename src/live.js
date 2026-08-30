@@ -194,6 +194,7 @@ export function buildSnapshot({ now = new Date(), claude, codex }) {
       const primary = codex.rateLimits?.rateLimits?.primary;
       snapshot.codex = {
         today: codex.today,
+        ...(codex.todayEstimated && { todayEstimated: true }),
         lifetime: codex.summary?.lifetimeTokens ?? 0,
         ...(primary && {
           usedPercent: primary.usedPercent ?? 0,
@@ -244,7 +245,14 @@ export function renderFrame(state) {
     lines.push(`  ${D}unavailable: ${codex.error}${R}`);
   } else if (codex) {
     const s = codex.summary ?? {};
-    lines.push(row('today', `${fmt(codex.today)} tokens`));
+    lines.push(
+      row(
+        'today',
+        codex.todayEstimated
+          ? `~${fmt(codex.today)} tokens ${D}(local estimate — API lags)${R}`
+          : `${fmt(codex.today)} tokens`,
+      ),
+    );
     lines.push(row('lifetime', `${fmt(s.lifetimeTokens)}   ${D}streak${R} ${fmt(s.currentStreakDays)}d`));
     lines.push(row(`last ${days}d`, `${sparkline(codex.daily)}  ${D}peak ${compact(s.peakDailyTokens)}/day${R}`));
     const rl = codex.rateLimits?.rateLimits;

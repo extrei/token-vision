@@ -58,6 +58,8 @@ test('CLI --once with mock codex shows codex usage and no rate-limit line', asyn
       process.execPath,
       '--codex-args',
       'test/fixtures/mock-app-server.js',
+      '--codex-home',
+      'test/fixtures/no-such-codex-home',
     ],
     { cwd: ROOT, timeout: 30_000, env: { ...process.env, MOCK_MODE: 'happy' } },
   );

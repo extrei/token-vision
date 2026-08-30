@@ -3,6 +3,7 @@ import { parseArgs } from 'node:util';
 import { summarize } from './claude-usage.js';
 import { AppServerClient } from './app-server-client.js';
 import { TranscriptTailer, RateWindow, renderFrame, buildSnapshot, lastNDays, todayTokens } from './live.js';
+import { CodexSessionScanner, localTodayTokens, overlayToday } from './codex-local.js';
 
 /**
  * Live terminal view of token usage: Claude Code transcripts are tailed
@@ -44,7 +45,7 @@ export function createLiveState({ claudeDir, days = 14, now = () => new Date() }
   };
 }
 
-export async function pollCodex(client, { days = 14, now = new Date() } = {}) {
+export async function pollCodex(client, { days = 14, now = new Date(), codexHome, scanner } = {}) {
   const usage = await client.readAccountUsage();
   let rateLimits;
   try {
@@ -52,10 +53,20 @@ export async function pollCodex(client, { days = 14, now = new Date() } = {}) {
   } catch {
     rateLimits = undefined; // usage still worth showing
   }
+  // The backend's daily buckets lag behind (usually stopping at yesterday);
+  // fill today's bucket from the local session rollouts as a floor.
+  let local = 0;
+  try {
+    local = scanner ? await scanner.todayTokens(now) : await localTodayTokens({ codexHome, now });
+  } catch {
+    /* no local sessions — keep the API value */
+  }
+  const { buckets, today, todayEstimated } = overlayToday(usage.dailyUsageBuckets, local, now);
   return {
     summary: usage.summary,
-    today: todayTokens(usage.dailyUsageBuckets, now),
-    daily: lastNDays(usage.dailyUsageBuckets, days, now),
+    today,
+    todayEstimated,
+    daily: lastNDays(buckets, days, now),
     rateLimits,
   };
 }
@@ -72,6 +83,7 @@ async function main() {
       stream: { type: 'boolean', default: false },
       'codex-cmd': { type: 'string', default: 'codex' },
       'codex-args': { type: 'string', default: 'app-server' },
+      'codex-home': { type: 'string' },
       help: { type: 'boolean', short: 'h', default: false },
     },
   });
@@ -90,6 +102,8 @@ Options:
   --stream              Emit NDJSON snapshots instead of a TUI (for widgets)
   --codex-cmd <cmd>     Codex binary (default: codex)
   --codex-args <args>   Comma-separated args (default: app-server)
+  --codex-home <dir>    Codex home for the local same-day estimate
+                        (default: $CODEX_HOME or ~/.codex)
   -h, --help            Show this help`);
     return;
   }
@@ -115,10 +129,13 @@ Options:
     }
   }
 
+  const scanner = client
+    ? new CodexSessionScanner(values['codex-home'] ? { codexHome: values['codex-home'] } : {})
+    : null;
   const refreshCodex = async () => {
     if (!client) return;
     try {
-      codex = await pollCodex(client, { days });
+      codex = await pollCodex(client, { days, scanner });
     } catch (err) {
       codex = { error: err.message };
     }

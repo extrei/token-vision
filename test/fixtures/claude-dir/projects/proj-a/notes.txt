@@ -1,0 +1,3 @@
+This non-.jsonl file must be ignored by the transcript scanner even though the
+line below would parse as a valid assistant usage entry.
+{"type":"assistant","uuid":"u-stray-txt","requestId":"req_stray_txt","timestamp":"2026-08-28T12:00:00.000Z","message":{"id":"msg_stray_txt","model":"claude-opus-5","usage":{"input_tokens":1000000,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":0}}}

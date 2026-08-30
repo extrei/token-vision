@@ -1,7 +1,12 @@
 # codex-usage
 
-Node.js client for the Codex CLI app-server that reads account token usage via the
-`account/usage/read` JSON-RPC method.
+Node.js clients that read account token usage for both CLI agents:
+
+- **Codex** — live from the `codex app-server` JSON-RPC method `account/usage/read`
+- **Claude Code** — aggregated offline from the local session transcripts in
+  `~/.claude/projects/**/*.jsonl` (there is no per-user usage API for Pro/Max
+  accounts: the `/usage` screen is interactive-only and the Admin/Analytics
+  usage APIs require an organization admin key)
 
 ## Usage
 
@@ -14,6 +19,22 @@ node src/read-usage.js --codex /path/to/codex --timeout 10000
 
 Requires the `codex` CLI on `PATH` (tested with codex-cli 0.148.0) and an
 authenticated Codex account (`codex login`).
+
+### Claude Code
+
+```sh
+node src/read-claude-usage.js           # human-readable summary
+node src/read-claude-usage.js --json    # raw JSON report
+node src/read-claude-usage.js --claude-dir /path/to/.claude --days 30
+```
+
+Reads `<claude-dir>/projects/**/*.jsonl` (default `$CLAUDE_CONFIG_DIR` or
+`~/.claude`) and produces the same shape as the Codex response: `summary`
+(lifetime/peak tokens, streaks, plus input/output/cache splits), UTC-bucketed
+`dailyUsageBuckets`, and a per-model breakdown. Duplicated transcript lines
+(resumed/forked sessions) are deduplicated by message id + request id;
+synthetic error placeholders are skipped. Caveats: local machine only, and the
+transcript format is internal to Claude Code and may change between versions.
 
 ## Protocol
 

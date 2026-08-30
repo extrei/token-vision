@@ -1,0 +1,17 @@
+{
+  "name": "codex-usage",
+  "version": "1.0.0",
+  "description": "Read account usage from the Codex CLI app-server (JSON-RPC over stdio)",
+  "type": "module",
+  "bin": {
+    "codex-usage": "./src/read-usage.js"
+  },
+  "scripts": {
+    "start": "node src/read-usage.js",
+    "test": "node --test \"test/**/*.test.js\""
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT"
+}

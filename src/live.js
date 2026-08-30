@@ -170,6 +170,46 @@ function limitLine(name, window, now, { ansi }) {
 }
 
 /**
+ * Flatten the live state into one compact JSON-ready snapshot — the wire
+ * format of `live-usage.js --stream`, consumed by the menu-bar widget.
+ * Pure given its inputs.
+ */
+export function buildSnapshot({ now = new Date(), claude, codex }) {
+  const snapshot = { ts: now.toISOString() };
+  if (claude) {
+    snapshot.claude = {
+      perMinute: claude.perMinute,
+      perFiveMinutes: claude.perFiveMinutes,
+      today: claude.today,
+      lifetime: claude.summary?.lifetimeTokens ?? 0,
+      messages: claude.summary?.assistantMessages ?? 0,
+    };
+  }
+  if (codex !== undefined) {
+    if (codex === null) {
+      snapshot.codex = { pending: true };
+    } else if (codex.error) {
+      snapshot.codex = { error: codex.error };
+    } else {
+      const primary = codex.rateLimits?.rateLimits?.primary;
+      snapshot.codex = {
+        today: codex.today,
+        lifetime: codex.summary?.lifetimeTokens ?? 0,
+        ...(primary && {
+          usedPercent: primary.usedPercent ?? 0,
+          windowMins: primary.windowDurationMins ?? null,
+          resetsAt: primary.resetsAt ?? null,
+        }),
+        ...(codex.rateLimits?.rateLimits?.planType && {
+          planType: codex.rateLimits.rateLimits.planType,
+        }),
+      };
+    }
+  }
+  return snapshot;
+}
+
+/**
  * Render one frame of the live view as a plain string (no cursor control —
  * the caller owns screen management). Pure given `state`.
  */

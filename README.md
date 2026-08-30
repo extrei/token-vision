@@ -88,6 +88,20 @@ account usage plus `account/rateLimits/read` utilization (colored bar, reset
 time). Sparklines show the last N days per agent. Codex being unavailable or
 unauthenticated degrades to a note; the Claude side keeps running.
 
+### Menu-bar widget (macOS)
+
+```sh
+sh widget/build.sh        # compiles widget/TokenVision (needs Xcode CLT)
+./widget/TokenVision &    # shows ⌁ <rate>/m in the menu bar; quit from its menu
+```
+
+A small native `NSStatusItem` app that runs `node src/live-usage.js --stream`
+(NDJSON snapshots) and mirrors it live: the title shows Claude tokens/min
+(plus the Codex limit percent once it crosses 60%), the dropdown shows
+today/lifetime totals for both agents and the Codex rate-limit reset. The
+streamer is relaunched automatically if it dies; pass a custom script path as
+the first argument if you move things around.
+
 ## Tests
 
 ```sh

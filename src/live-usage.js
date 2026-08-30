@@ -2,7 +2,7 @@
 import { parseArgs } from 'node:util';
 import { summarize } from './claude-usage.js';
 import { AppServerClient } from './app-server-client.js';
-import { TranscriptTailer, RateWindow, renderFrame, lastNDays, todayTokens } from './live.js';
+import { TranscriptTailer, RateWindow, renderFrame, buildSnapshot, lastNDays, todayTokens } from './live.js';
 
 /**
  * Live terminal view of token usage: Claude Code transcripts are tailed
@@ -69,6 +69,7 @@ async function main() {
       'claude-dir': { type: 'string' },
       days: { type: 'string', default: '14' },
       once: { type: 'boolean', default: false },
+      stream: { type: 'boolean', default: false },
       'codex-cmd': { type: 'string', default: 'codex' },
       'codex-args': { type: 'string', default: 'app-server' },
       help: { type: 'boolean', short: 'h', default: false },
@@ -86,6 +87,7 @@ Options:
   --claude-dir <dir>    Claude config dir (default: $CLAUDE_CONFIG_DIR or ~/.claude)
   --days <n>            Days in the sparklines (default: 14)
   --once                Render a single frame and exit
+  --stream              Emit NDJSON snapshots instead of a TUI (for widgets)
   --codex-cmd <cmd>     Codex binary (default: codex)
   --codex-args <args>   Comma-separated args (default: app-server)
   -h, --help            Show this help`);
@@ -140,6 +142,34 @@ Options:
   if (values.once) {
     console.log(frame());
     await client?.close();
+    return;
+  }
+
+  if (values.stream) {
+    const emit = () =>
+      console.log(
+        JSON.stringify(
+          buildSnapshot({
+            now: new Date(),
+            claude: state.claudeFrame(),
+            codex: values['no-codex'] ? undefined : codex,
+          }),
+        ),
+      );
+    emit();
+    const streamTimer = setInterval(async () => {
+      await state.scanClaude();
+      emit();
+    }, Number(values.interval) * 1000);
+    const streamCodexTimer = setInterval(refreshCodex, Number(values['codex-interval']) * 1000);
+    const stop = async () => {
+      clearInterval(streamTimer);
+      clearInterval(streamCodexTimer);
+      await client?.close();
+      process.exit(0);
+    };
+    process.on('SIGINT', stop);
+    process.on('SIGTERM', stop);
     return;
   }
 

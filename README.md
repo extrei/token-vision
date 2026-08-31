@@ -119,12 +119,14 @@ sh widget/build.sh        # compiles widget/TokenVision (needs Xcode CLT)
 ./widget/TokenVision &    # shows ⌁ <rate>/m in the menu bar; quit from its menu
 ```
 
-A small native `NSStatusItem` app that runs `node src/live-usage.js --stream`
-(NDJSON snapshots) and mirrors it live: the title shows Claude tokens/min
-(plus the Codex limit percent once it crosses 60%), the dropdown shows
-today/lifetime totals for both agents and the Codex rate-limit reset. The
-streamer is relaunched automatically if it dies; pass a custom script path as
-the first argument if you move things around.
+A small native `NSStatusItem` + SwiftUI app that runs
+`node src/live-usage.js --stream` (NDJSON snapshots) and mirrors it live. The
+menu-bar title shows Claude tokens/min (plus `· C nn%` / `· X nn%` once a
+limit crosses 60%). Clicking it opens a 498×198 panel with both agents side
+by side — hero numbers (live Claude rate, Codex today), 14-day sparklines,
+and plan-limit gauges with reset times, colored by severity. Right-click the
+status item to quit. The streamer is relaunched automatically if it dies;
+pass a custom script path as the first argument if you move things around.
 
 ## Tests
 

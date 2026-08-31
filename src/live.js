@@ -173,6 +173,7 @@ export function buildSnapshot({ now = new Date(), claude, codex }) {
       today: claude.today,
       lifetime: claude.summary?.lifetimeTokens ?? 0,
       messages: claude.summary?.assistantMessages ?? 0,
+      ...(claude.daily && { daily: claude.daily }),
       ...(claude.limits?.windows?.length && { limits: claude.limits.windows }),
     };
   }
@@ -187,6 +188,7 @@ export function buildSnapshot({ now = new Date(), claude, codex }) {
         today: codex.today,
         ...(codex.todayEstimated && { todayEstimated: true }),
         lifetime: codex.summary?.lifetimeTokens ?? 0,
+        ...(codex.daily && { daily: codex.daily }),
         ...(primary && {
           usedPercent: primary.usedPercent ?? 0,
           windowMins: primary.windowDurationMins ?? null,

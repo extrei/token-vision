@@ -40,6 +40,23 @@ test('buildSnapshot: claude summary flattened, rates and today passed through', 
   });
 });
 
+test('buildSnapshot: daily arrays pass through when present, omitted when absent', () => {
+  const snap = buildSnapshot({
+    now: NOW,
+    claude: { perMinute: 1, perFiveMinutes: 2, today: 3, summary: {}, daily: [1, 2, 3] },
+    codex: { today: 4, summary: {}, daily: [5, 6] },
+  });
+  assert.deepEqual(snap.claude.daily, [1, 2, 3]);
+  assert.deepEqual(snap.codex.daily, [5, 6]);
+  const bare = buildSnapshot({
+    now: NOW,
+    claude: { perMinute: 1, perFiveMinutes: 2, today: 3, summary: {} },
+    codex: { today: 4, summary: {} },
+  });
+  assert.ok(!('daily' in bare.claude));
+  assert.ok(!('daily' in bare.codex));
+});
+
 test('buildSnapshot: codex undefined -> no codex key at all', () => {
   const snap = buildSnapshot({ now: NOW, codex: undefined });
   assert.ok(!('codex' in snap));

@@ -1,11 +1,15 @@
-// Token Vision — a small macOS menu-bar widget showing live token usage.
+// Token Vision — a macOS menu-bar widget showing live token usage.
 //
-// It runs `node src/live-usage.js --stream` (the NDJSON snapshot mode) and
-// mirrors each snapshot into the status bar: live Claude tokens/min in the
-// title, details in the dropdown. Build with widget/build.sh; quit from the
-// menu. No dock icon, no window — just the status item.
+// The status item shows live Claude tokens/min; clicking it opens a 498x198
+// SwiftUI panel with both agents side by side: hero numbers, 14-day
+// sparklines, and plan-limit gauges with reset times. Right-click the status
+// item to quit. Data comes from `node src/live-usage.js --stream` (NDJSON).
+// Build with widget/build.sh.
 
 import AppKit
+import SwiftUI
+
+// MARK: - Formatting helpers
 
 func compact(_ n: Double) -> String {
     let abs = Swift.abs(n)
@@ -30,20 +34,269 @@ func resetLabel(_ epoch: Double) -> String {
 
 func resetLabelAny(_ value: Any?) -> String? {
     if let epoch = num(value) { return resetLabel(epoch) }
-    if let iso = value as? String {
-        let f = ISO8601DateFormatter()
-        if let d = f.date(from: iso) { return resetLabel(d.timeIntervalSince1970) }
+    if let iso = value as? String, let d = ISO8601DateFormatter().date(from: iso) {
+        return resetLabel(d.timeIntervalSince1970)
     }
     return nil
 }
 
+// MARK: - Palette (dataviz reference palette, light/dark selected per mode)
+
+func dynamicColor(light: UInt32, dark: UInt32) -> Color {
+    func nsColor(_ v: UInt32) -> NSColor {
+        NSColor(
+            srgbRed: CGFloat((v >> 16) & 0xFF) / 255,
+            green: CGFloat((v >> 8) & 0xFF) / 255,
+            blue: CGFloat(v & 0xFF) / 255,
+            alpha: 1
+        )
+    }
+    return Color(nsColor: NSColor(name: nil) { appearance in
+        appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? nsColor(dark) : nsColor(light)
+    })
+}
+
+enum Palette {
+    static let claude = dynamicColor(light: 0x2A78D6, dark: 0x3987E5) // categorical slot 1
+    static let codex = dynamicColor(light: 0xEB6834, dark: 0xD95926) // categorical slot 2
+    static let warning = dynamicColor(light: 0xFAB219, dark: 0xFAB219)
+    static let critical = dynamicColor(light: 0xD03B3B, dark: 0xD03B3B)
+}
+
+// MARK: - Snapshot model
+
+struct LimitWindow: Identifiable {
+    let id: String
+    let name: String
+    let usedPercent: Int
+    let reset: String?
+}
+
+struct AgentData {
+    var hero: String
+    var heroUnit: String
+    var subline: String
+    var daily: [Double]
+    var limits: [LimitWindow]
+    var note: String?
+}
+
+struct Snapshot {
+    var claude: AgentData?
+    var codex: AgentData?
+
+    init(dict: [String: Any]) {
+        if let c = dict["claude"] as? [String: Any] {
+            let rate = num(c["perMinute"]) ?? 0
+            var limits: [LimitWindow] = []
+            for (i, w) in ((c["limits"] as? [[String: Any]]) ?? []).enumerated() {
+                limits.append(LimitWindow(
+                    id: "\(i)-\(w["name"] as? String ?? "")",
+                    name: w["name"] as? String ?? "limit",
+                    usedPercent: Int(num(w["usedPercent"]) ?? 0),
+                    reset: resetLabelAny(w["resetsAt"])
+                ))
+            }
+            claude = AgentData(
+                hero: rate > 0 ? compact(rate) : "idle",
+                heroUnit: rate > 0 ? "tok/min" : "",
+                subline: "today \(compact(num(c["today"]) ?? 0)) · lifetime \(compact(num(c["lifetime"]) ?? 0))",
+                daily: (c["daily"] as? [Any])?.compactMap(num) ?? [],
+                limits: limits,
+                note: nil
+            )
+        }
+        if let x = dict["codex"] as? [String: Any] {
+            if x["pending"] != nil {
+                codex = AgentData(hero: "…", heroUnit: "", subline: "waiting for first poll",
+                                  daily: [], limits: [], note: nil)
+            } else if let error = x["error"] as? String {
+                codex = AgentData(hero: "—", heroUnit: "", subline: "",
+                                  daily: [], limits: [], note: error)
+            } else {
+                let estimate = (x["todayEstimated"] as? Bool) == true ? "~" : ""
+                var limits: [LimitWindow] = []
+                if let used = num(x["usedPercent"]) {
+                    limits.append(LimitWindow(
+                        id: "codex-limit",
+                        name: "\(x["planType"] as? String ?? "plan") limit",
+                        usedPercent: Int(used),
+                        reset: resetLabelAny(x["resetsAt"])
+                    ))
+                }
+                codex = AgentData(
+                    hero: estimate + compact(num(x["today"]) ?? 0),
+                    heroUnit: "today",
+                    subline: "lifetime \(compact(num(x["lifetime"]) ?? 0))",
+                    daily: (x["daily"] as? [Any])?.compactMap(num) ?? [],
+                    limits: limits,
+                    note: nil
+                )
+            }
+        }
+    }
+
+    var claudeRateSuffix: String {
+        guard let maxUsed = claude?.limits.map(\.usedPercent).max(), maxUsed >= 60 else { return "" }
+        return " · C \(maxUsed)%"
+    }
+    var codexSuffix: String {
+        guard let used = codex?.limits.first?.usedPercent, used >= 60 else { return "" }
+        return " · X \(used)%"
+    }
+}
+
+final class Model: ObservableObject {
+    @Published var snapshot: Snapshot?
+}
+
+// MARK: - Views
+
+struct SparklineView: View {
+    let values: [Double]
+    let color: Color
+
+    var body: some View {
+        GeometryReader { geo in
+            let maxV = max(values.max() ?? 0, 1)
+            let w = geo.size.width
+            let h = geo.size.height - 3
+            let step = values.count > 1 ? w / CGFloat(values.count - 1) : w
+            let pts = values.enumerated().map { i, v in
+                CGPoint(x: CGFloat(i) * step, y: 1.5 + h * (1 - CGFloat(v / maxV)))
+            }
+            if pts.count > 1 {
+                Path { p in
+                    p.move(to: CGPoint(x: pts[0].x, y: geo.size.height))
+                    for pt in pts { p.addLine(to: pt) }
+                    p.addLine(to: CGPoint(x: pts[pts.count - 1].x, y: geo.size.height))
+                    p.closeSubpath()
+                }
+                .fill(color.opacity(0.1))
+                Path { p in
+                    p.move(to: pts[0])
+                    for pt in pts.dropFirst() { p.addLine(to: pt) }
+                }
+                .stroke(color, style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
+            }
+        }
+    }
+}
+
+struct GaugeRow: View {
+    let limit: LimitWindow
+    let accent: Color
+
+    var fill: Color {
+        limit.usedPercent >= 85 ? Palette.critical : limit.usedPercent >= 60 ? Palette.warning : accent
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 4) {
+                Text(limit.name)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                Spacer(minLength: 4)
+                if let reset = limit.reset {
+                    Text("resets \(reset)")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                }
+                Text("\(limit.usedPercent)%")
+                    .font(.caption2.weight(.medium).monospacedDigit())
+                    .foregroundStyle(.primary)
+            }
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    Capsule().fill(fill.opacity(0.18))
+                    Capsule()
+                        .fill(fill)
+                        .frame(width: max(5, geo.size.width * CGFloat(limit.usedPercent) / 100))
+                }
+            }
+            .frame(height: 5)
+        }
+    }
+}
+
+struct AgentColumn: View {
+    let title: String
+    let data: AgentData?
+    let accent: Color
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 5) {
+                Circle().fill(accent).frame(width: 7, height: 7)
+                Text(title)
+                    .font(.caption2.weight(.semibold))
+                    .kerning(0.8)
+                    .foregroundStyle(.secondary)
+            }
+            if let data {
+                HStack(alignment: .firstTextBaseline, spacing: 5) {
+                    Text(data.hero)
+                        .font(.system(size: 24, weight: .semibold, design: .rounded))
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.6)
+                    if !data.heroUnit.isEmpty {
+                        Text(data.heroUnit)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                if let note = data.note {
+                    Text(note)
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(2)
+                    Spacer()
+                } else {
+                    SparklineView(values: data.daily, color: accent)
+                        .frame(height: 26)
+                    Text(data.subline)
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                    Spacer(minLength: 2)
+                    ForEach(data.limits.prefix(2)) { limit in
+                        GaugeRow(limit: limit, accent: accent)
+                    }
+                }
+            } else {
+                Text("waiting for data…")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+                Spacer()
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+struct WidgetView: View {
+    @ObservedObject var model: Model
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            AgentColumn(title: "CLAUDE", data: model.snapshot?.claude, accent: Palette.claude)
+            Divider()
+            AgentColumn(title: "CODEX", data: model.snapshot?.codex, accent: Palette.codex)
+        }
+        .padding(12)
+        .frame(width: 498, height: 198)
+    }
+}
+
+// MARK: - App delegate
+
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-    let claudeRate = NSMenuItem(title: "starting…", action: nil, keyEquivalent: "")
-    let claudeTotals = NSMenuItem(title: "", action: nil, keyEquivalent: "")
-    let codexTotals = NSMenuItem(title: "waiting for first poll…", action: nil, keyEquivalent: "")
-    let codexLimit = NSMenuItem(title: "", action: nil, keyEquivalent: "")
-    var claudeLimitItems: [NSMenuItem] = []
+    let model = Model()
+    let popover = NSPopover()
     var proc: Process?
     var buffer = Data()
     var quitting = false
@@ -57,23 +310,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         setTitle("⌁ …")
-        let menu = NSMenu()
-        let claudeHeader = NSMenuItem(title: "Claude Code", action: nil, keyEquivalent: "")
-        let codexHeader = NSMenuItem(title: "Codex", action: nil, keyEquivalent: "")
-        for header in [claudeHeader, codexHeader] { header.isEnabled = false }
-        for detail in [claudeRate, claudeTotals, codexTotals, codexLimit] { detail.isEnabled = false }
-        menu.addItem(claudeHeader)
-        menu.addItem(claudeRate)
-        menu.addItem(claudeTotals)
-        menu.addItem(.separator())
-        menu.addItem(codexHeader)
-        menu.addItem(codexTotals)
-        menu.addItem(codexLimit)
-        menu.addItem(.separator())
-        menu.addItem(NSMenuItem(title: "Quit Token Vision", action: #selector(quit), keyEquivalent: "q"))
-        menu.autoenablesItems = false
-        item.menu = menu
+        popover.contentSize = NSSize(width: 498, height: 198)
+        popover.behavior = .transient
+        popover.contentViewController = NSHostingController(rootView: WidgetView(model: model))
+        if let button = item.button {
+            button.action = #selector(statusClicked)
+            button.target = self
+            button.sendAction(on: [.leftMouseUp, .rightMouseUp])
+        }
         launchStreamer()
+    }
+
+    @objc func statusClicked() {
+        if NSApp.currentEvent?.type == .rightMouseUp {
+            let menu = NSMenu()
+            menu.addItem(NSMenuItem(title: "Quit Token Vision", action: #selector(quit), keyEquivalent: "q"))
+            item.menu = menu
+            item.button?.performClick(nil)
+            item.menu = nil
+        } else if popover.isShown {
+            popover.performClose(nil)
+        } else if let button = item.button {
+            popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+            NSApp.activate(ignoringOtherApps: true)
+        }
     }
 
     @objc func quit() {
@@ -127,70 +387,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             buffer.removeSubrange(buffer.startIndex...nl)
             guard
                 let obj = try? JSONSerialization.jsonObject(with: line),
-                let snapshot = obj as? [String: Any]
+                let dict = obj as? [String: Any]
             else { continue }
-            DispatchQueue.main.async { self.apply(snapshot) }
+            DispatchQueue.main.async { self.apply(Snapshot(dict: dict)) }
         }
     }
 
-    func apply(_ snapshot: [String: Any]) {
+    func apply(_ snapshot: Snapshot) {
+        model.snapshot = snapshot
         var title = "⌁ —"
-        if let claude = snapshot["claude"] as? [String: Any] {
-            let rate = num(claude["perMinute"]) ?? 0
-            title = rate > 0 ? "⌁ \(compact(rate))/m" : "⌁ idle"
-            claudeRate.title = rate > 0
-                ? "rate  \(compact(rate)) tok/min · \(compact(num(claude["perFiveMinutes"]) ?? 0)) in 5m"
-                : "rate  idle"
-            claudeTotals.title =
-                "today \(compact(num(claude["today"]) ?? 0)) · lifetime \(compact(num(claude["lifetime"]) ?? 0))"
-            updateClaudeLimits(claude["limits"] as? [[String: Any]] ?? [])
-            let maxUsed = (claude["limits"] as? [[String: Any]] ?? [])
-                .compactMap { num($0["usedPercent"]) }.max() ?? 0
-            if maxUsed >= 60 { title += " · C \(Int(maxUsed))%" }
+        if let claude = snapshot.claude {
+            title = claude.heroUnit.isEmpty ? "⌁ \(claude.hero)" : "⌁ \(claude.hero)/m"
         }
-        title += applyCodex(snapshot)
+        title += snapshot.claudeRateSuffix + snapshot.codexSuffix
         setTitle(title)
-    }
-
-    func updateClaudeLimits(_ limits: [[String: Any]]) {
-        guard let menu = item.menu else { return }
-        for old in claudeLimitItems { menu.removeItem(old) }
-        claudeLimitItems = []
-        let anchor = menu.index(of: claudeTotals) + 1
-        for (i, w) in limits.enumerated() {
-            let name = w["name"] as? String ?? "limit"
-            var text = "\(name) \(Int(num(w["usedPercent"]) ?? 0))%"
-            if let reset = resetLabelAny(w["resetsAt"]) { text += " · resets \(reset)" }
-            let row = NSMenuItem(title: text, action: nil, keyEquivalent: "")
-            row.isEnabled = false
-            menu.insertItem(row, at: anchor + i)
-            claudeLimitItems.append(row)
-        }
-    }
-
-    /// Updates the codex menu rows; returns a title suffix like " · X 72%"
-    /// when the codex limit is running hot.
-    func applyCodex(_ snapshot: [String: Any]) -> String {
-        guard let codex = snapshot["codex"] as? [String: Any] else { return "" }
-        if codex["pending"] != nil {
-            codexTotals.title = "waiting for first poll…"
-            codexLimit.title = ""
-        } else if let error = codex["error"] as? String {
-            codexTotals.title = "unavailable: \(error)"
-            codexLimit.title = ""
-        } else {
-            let estimate = (codex["todayEstimated"] as? Bool) == true ? "~" : ""
-            codexTotals.title =
-                "today \(estimate)\(compact(num(codex["today"]) ?? 0)) · lifetime \(compact(num(codex["lifetime"]) ?? 0))"
-            if let used = num(codex["usedPercent"]) {
-                let plan = codex["planType"] as? String ?? "plan"
-                var line = "\(plan) limit \(Int(used))%"
-                if let resetsAt = num(codex["resetsAt"]) { line += " · resets \(resetLabel(resetsAt))" }
-                codexLimit.title = line
-                if used >= 60 { return " · X \(Int(used))%" }
-            }
-        }
-        return ""
     }
 }
 

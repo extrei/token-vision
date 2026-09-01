@@ -112,23 +112,24 @@ local rollouts can't see usage from other devices or cloud tasks (validated at
 95–97% of the API's figure for same-machine days). `--codex-home` overrides
 the rollout location.
 
-### Notch widget (macOS)
+### Menu-bar widget (macOS)
 
 ```sh
 sh widget/build.sh        # compiles widget/TokenVision (needs Xcode CLT)
-./widget/TokenVision &    # black pill under the notch; right-click it to quit
+./widget/TokenVision &    # starburst button in the menu bar; right-click it to quit
 ```
 
 A small native SwiftUI app that runs `node src/live-usage.js --stream` (NDJSON
-snapshots) and mirrors it live. A black pill hangs from the right edge of the
-notch (top-right corner on notch-less displays, always on the menu-bar
-screen) with one ring gauge per agent — Claude and Codex — showing the most-used
-plan-limit window, colored by severity (green < 40%, yellow < 70%, red).
-Hovering a ring opens a callout listing every window (`Current session`,
+snapshots) and mirrors it live. A Claude-starburst button sits in the menu
+bar; clicking it slides a black tray out horizontally beneath it with one
+ring gauge per agent — Claude and Codex — showing the most-used plan-limit
+window, colored by severity (green < 40%, yellow < 70%, red). Hovering a ring
+opens a callout under it listing every window (`Current session`,
 `All models` / `Weekly`, …) with a bar, percent used, and the reset time
-(`Resets in 51 min`, `Resets Thu 12:00 AM`). Right-click the pill to quit.
-The streamer is relaunched automatically if it dies; pass a custom script
-path as the first argument if you move things around.
+(`Resets in 51 min`, `Resets Thu 12:00 AM`). Clicking anywhere else, or the
+button again, slides the tray back in. Right-click the button to quit. The
+streamer is relaunched automatically if it dies; pass a custom script path as
+the first argument if you move things around.
 
 ## Tests
 

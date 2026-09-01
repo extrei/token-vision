@@ -112,21 +112,23 @@ local rollouts can't see usage from other devices or cloud tasks (validated at
 95–97% of the API's figure for same-machine days). `--codex-home` overrides
 the rollout location.
 
-### Menu-bar widget (macOS)
+### Notch widget (macOS)
 
 ```sh
 sh widget/build.sh        # compiles widget/TokenVision (needs Xcode CLT)
-./widget/TokenVision &    # shows ⌁ <rate>/m in the menu bar; quit from its menu
+./widget/TokenVision &    # black pill under the notch; right-click it to quit
 ```
 
-A small native `NSStatusItem` + SwiftUI app that runs
-`node src/live-usage.js --stream` (NDJSON snapshots) and mirrors it live. The
-menu-bar title shows Claude tokens/min (plus `· C nn%` / `· X nn%` once a
-limit crosses 60%). Clicking it opens a 498×198 panel with both agents side
-by side — hero numbers (live Claude rate, Codex today), 14-day sparklines,
-and plan-limit gauges with reset times, colored by severity. Right-click the
-status item to quit. The streamer is relaunched automatically if it dies;
-pass a custom script path as the first argument if you move things around.
+A small native SwiftUI app that runs `node src/live-usage.js --stream` (NDJSON
+snapshots) and mirrors it live. A black pill hangs from the right edge of the
+notch (top-right corner on notch-less displays, always on the menu-bar
+screen) with one ring gauge per agent — Claude and Codex — showing the most-used
+plan-limit window, colored by severity (green < 40%, yellow < 70%, red).
+Hovering a ring opens a callout listing every window (`Current session`,
+`All models` / `Weekly`, …) with a bar, percent used, and the reset time
+(`Resets in 51 min`, `Resets Thu 12:00 AM`). Right-click the pill to quit.
+The streamer is relaunched automatically if it dies; pass a custom script
+path as the first argument if you move things around.
 
 ## Tests
 

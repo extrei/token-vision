@@ -184,6 +184,7 @@ export function buildSnapshot({ now = new Date(), claude, codex }) {
       snapshot.codex = { error: codex.error };
     } else {
       const primary = codex.rateLimits?.rateLimits?.primary;
+      const secondary = codex.rateLimits?.rateLimits?.secondary;
       snapshot.codex = {
         today: codex.today,
         ...(codex.todayEstimated && { todayEstimated: true }),
@@ -193,6 +194,13 @@ export function buildSnapshot({ now = new Date(), claude, codex }) {
           usedPercent: primary.usedPercent ?? 0,
           windowMins: primary.windowDurationMins ?? null,
           resetsAt: primary.resetsAt ?? null,
+        }),
+        ...(secondary && {
+          secondary: {
+            usedPercent: secondary.usedPercent ?? 0,
+            windowMins: secondary.windowDurationMins ?? null,
+            resetsAt: secondary.resetsAt ?? null,
+          },
         }),
         ...(codex.rateLimits?.rateLimits?.planType && {
           planType: codex.rateLimits.rateLimits.planType,

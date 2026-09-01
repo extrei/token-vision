@@ -72,7 +72,7 @@ test('buildSnapshot: codex error -> error passed through', () => {
   assert.deepEqual(snap.codex, { error: 'spawn codex ENOENT' });
 });
 
-test('buildSnapshot: full codex with rate limits maps primary window and planType', () => {
+test('buildSnapshot: full codex with rate limits maps primary/secondary windows and planType', () => {
   const snap = buildSnapshot({
     now: NOW,
     codex: {
@@ -82,6 +82,7 @@ test('buildSnapshot: full codex with rate limits maps primary window and planTyp
         rateLimits: {
           planType: 'pro',
           primary: { usedPercent: 37, windowDurationMins: 300, resetsAt: 1767225600 },
+          secondary: { usedPercent: 12, windowDurationMins: 10080, resetsAt: 1767830400 },
         },
       },
     },
@@ -92,6 +93,7 @@ test('buildSnapshot: full codex with rate limits maps primary window and planTyp
     usedPercent: 37,
     windowMins: 300,
     resetsAt: 1767225600,
+    secondary: { usedPercent: 12, windowMins: 10080, resetsAt: 1767830400 },
     planType: 'pro',
   });
 });

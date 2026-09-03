@@ -5,9 +5,15 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   USAGE_URL,
+  USAGE_USER_AGENT,
   getClaudeOAuthToken,
   normalizeLimits,
   fetchClaudeLimits,
+  reduceLimitsState,
+  limitsCachePath,
+  readCachedLimits,
+  writeCachedLimits,
+  isRetryableLimitsError,
 } from '../src/claude-limits.js';
 import { renderFrame, buildSnapshot } from '../src/live.js';
 
@@ -171,4 +177,172 @@ test('buildSnapshot: omits claude.limits when windows are empty or limits absent
   assert.ok(!('limits' in empty.claude));
   const absent = buildSnapshot({ now: NOW, claude: claudeState() });
   assert.ok(!('limits' in absent.claude));
+});
+
+
+// ---------------------------------------------------------------- User-Agent
+
+test('fetchClaudeLimits: sends the claude-cli User-Agent the endpoint expects', async () => {
+  let seen;
+  const fetchImpl = async (_url, opts) => {
+    seen = opts.headers['User-Agent'];
+    return { ok: true, status: 200, json: async () => ({}) };
+  };
+  await fetchClaudeLimits({ token: 't', fetchImpl });
+  assert.equal(seen, USAGE_USER_AGENT);
+  assert.match(seen, /claude-cli/);
+});
+
+// ---------------------------------------------------------------- isRetryableLimitsError
+
+test('isRetryableLimitsError: 429 / 5xx / rate-limit are retryable; 401 and unknown are not', () => {
+  assert.equal(isRetryableLimitsError(new Error('usage endpoint HTTP 429')), true);
+  assert.equal(isRetryableLimitsError(new Error('usage endpoint HTTP 503')), true);
+  assert.equal(isRetryableLimitsError(new Error('Rate limited. try later')), true);
+  assert.equal(isRetryableLimitsError(new Error('auth expired — open claude to refresh')), false);
+  assert.equal(isRetryableLimitsError(new Error('usage endpoint HTTP 400')), false);
+  assert.equal(isRetryableLimitsError('HTTP 429'), true);
+});
+
+// ---------------------------------------------------------------- disk cache
+
+test('limitsCachePath: honours XDG_CACHE_HOME', () => {
+  const p = limitsCachePath();
+  assert.ok(p.endsWith('/token-vision/claude-limits.json'));
+});
+
+test('writeCachedLimits / readCachedLimits: round-trips windows + fetchedAt', async (t) => {
+  const dir = await tempDir(t);
+  const path = join(dir, 'cache.json');
+  const windows = [{ name: 'session', usedPercent: 33, resetsAt: '2026-08-30T15:00:00Z' }];
+  await writeCachedLimits(windows, { path, fetchedAt: 1788654834000 });
+  assert.deepEqual(await readCachedLimits({ path }), { windows, fetchedAt: 1788654834000 });
+});
+
+test('writeCachedLimits: does not write empty windows', async (t) => {
+  const dir = await tempDir(t);
+  const path = join(dir, 'cache.json');
+  await writeCachedLimits([], { path });
+  assert.equal(await readCachedLimits({ path }), null);
+});
+
+test('readCachedLimits: missing or corrupt cache → null', async (t) => {
+  const dir = await tempDir(t);
+  assert.equal(await readCachedLimits({ path: join(dir, 'nope.json') }), null);
+  const corrupt = join(dir, 'corrupt.json');
+  await writeFile(corrupt, '{ not json');
+  assert.equal(await readCachedLimits({ path: corrupt }), null);
+  const noWindows = join(dir, 'nowin.json');
+  await writeFile(noWindows, JSON.stringify({ fetchedAt: 1 }));
+  assert.equal(await readCachedLimits({ path: noWindows }), null);
+});
+
+// ---------------------------------------------------------------- buildSnapshot staleness
+
+test('buildSnapshot: carries limitsAsOf + limitsStale for stale (cached) windows', () => {
+  const windows = [{ name: 'session', usedPercent: 33, resetsAt: null }];
+  const snap = buildSnapshot({
+    now: NOW,
+    claude: claudeState({ windows, fetchedAt: 1788654834000, stale: true }),
+  });
+  assert.deepEqual(snap.claude.limits, windows);
+  assert.equal(snap.claude.limitsAsOf, 1788654834000);
+  assert.equal(snap.claude.limitsStale, true);
+});
+
+test('buildSnapshot: fresh windows carry limitsAsOf but no stale flag', () => {
+  const windows = [{ name: 'session', usedPercent: 5, resetsAt: null }];
+  const snap = buildSnapshot({ now: NOW, claude: claudeState({ windows, fetchedAt: 123456 }) });
+  assert.equal(snap.claude.limitsAsOf, 123456);
+  assert.ok(!('limitsStale' in snap.claude));
+});
+
+test('buildSnapshot: empty windows with an error emit limitsError, not limits', () => {
+  const snap = buildSnapshot({ now: NOW, claude: claudeState({ error: 'usage endpoint HTTP 429' }) });
+  assert.ok(!('limits' in snap.claude));
+  assert.equal(snap.claude.limitsError, 'usage endpoint HTTP 429');
+});
+
+test('buildSnapshot: stale windows carry the error reason (so 401 != "rate limited")', () => {
+  const windows = [{ name: 'session', usedPercent: 9, resetsAt: null }];
+  const snap = buildSnapshot({
+    now: NOW,
+    claude: claudeState({ windows, stale: true, error: 'auth expired — open claude to refresh' }),
+  });
+  assert.equal(snap.claude.limitsStale, true);
+  assert.equal(snap.claude.limitsError, 'auth expired — open claude to refresh');
+});
+
+test('buildSnapshot: fresh (non-stale) windows never emit limitsError', () => {
+  const windows = [{ name: 'session', usedPercent: 9, resetsAt: null }];
+  const snap = buildSnapshot({ now: NOW, claude: claudeState({ windows, error: 'boom' }) });
+  assert.ok(!('limitsError' in snap.claude));
+  assert.ok(!('limitsStale' in snap.claude));
+});
+
+
+// ---------------------------------------------------------------- reduceLimitsState
+
+const RS_OPTS = { now: 1000, baseMs: 150_000, maxBackoffMs: 900_000 };
+const emptyState = { last: null, fails: 0, nextAt: 0 };
+const goodState = {
+  last: { windows: [{ name: 'session', usedPercent: 33, resetsAt: null }], fetchedAt: 500 },
+  fails: 0,
+  nextAt: 0,
+};
+
+test('reduceLimitsState: success stores last-good, resets fails, frees the cadence, and caches', () => {
+  const windows = [{ name: 'session', usedPercent: 40, resetsAt: null }];
+  const r = reduceLimitsState(emptyState, { ok: true, windows }, RS_OPTS);
+  assert.deepEqual(r.state, { last: { windows, fetchedAt: 1000 }, fails: 0, nextAt: 0 });
+  assert.deepEqual(r.limits, { windows, fetchedAt: 1000 });
+  assert.deepEqual(r.cache, windows);
+});
+
+test('reduceLimitsState: empty 200 does NOT clobber last-good; shows it stale; no cache write', () => {
+  const r = reduceLimitsState(goodState, { ok: true, windows: [] }, RS_OPTS);
+  assert.deepEqual(r.state.last, goodState.last); // preserved
+  assert.equal(r.state.nextAt, 0);
+  assert.deepEqual(r.limits.windows, goodState.last.windows);
+  assert.equal(r.limits.stale, true);
+  assert.equal(r.cache, null);
+});
+
+test('reduceLimitsState: empty 200 with no prior data → error, still no clobber', () => {
+  const r = reduceLimitsState(emptyState, { ok: true, windows: [] }, RS_OPTS);
+  assert.equal(r.state.last, null);
+  assert.equal(r.limits.error, 'no limit windows returned');
+  assert.ok(!('windows' in r.limits));
+});
+
+test('reduceLimitsState: retryable failure keeps last-good stale and backs off exponentially', () => {
+  const r1 = reduceLimitsState(goodState, { ok: false, error: new Error('usage endpoint HTTP 429') }, RS_OPTS);
+  assert.deepEqual(r1.state.last, goodState.last);
+  assert.equal(r1.state.fails, 1);
+  assert.equal(r1.state.nextAt, 1000 + 150_000); // base * 2^0
+  assert.equal(r1.limits.stale, true);
+  assert.match(r1.limits.error, /429/);
+  const r2 = reduceLimitsState(r1.state, { ok: false, error: new Error('HTTP 429') }, RS_OPTS);
+  assert.equal(r2.state.fails, 2);
+  assert.equal(r2.state.nextAt, 1000 + 300_000); // base * 2^1
+});
+
+test('reduceLimitsState: backoff is capped at maxBackoffMs', () => {
+  const many = { last: goodState.last, fails: 20, nextAt: 0 };
+  const r = reduceLimitsState(many, { ok: false, error: new Error('HTTP 503') }, RS_OPTS);
+  assert.equal(r.state.nextAt, 1000 + 900_000); // capped
+});
+
+test('reduceLimitsState: non-retryable failure (401) uses base interval, not exponential', () => {
+  const r = reduceLimitsState(goodState, { ok: false, error: new Error('auth expired — open claude to refresh') }, RS_OPTS);
+  assert.equal(r.state.nextAt, 1000 + 150_000);
+  assert.equal(r.limits.stale, true);
+  assert.match(r.limits.error, /auth expired/);
+});
+
+test('reduceLimitsState: failure with no prior data → error object, no stale windows', () => {
+  const r = reduceLimitsState(emptyState, { ok: false, error: new Error('HTTP 429') }, RS_OPTS);
+  assert.equal(r.state.last, null);
+  assert.match(r.limits.error, /429/);
+  assert.ok(!('windows' in r.limits));
 });

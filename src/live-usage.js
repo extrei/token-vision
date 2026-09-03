@@ -4,7 +4,13 @@ import { summarize } from './claude-usage.js';
 import { AppServerClient } from './app-server-client.js';
 import { TranscriptTailer, RateWindow, renderFrame, buildSnapshot, lastNDays, todayTokens } from './live.js';
 import { CodexSessionScanner, localTodayTokens, overlayToday } from './codex-local.js';
-import { readClaudeLimits } from './claude-limits.js';
+import { SessionWatcher } from './codex-session-watch.mjs';
+import {
+  readClaudeLimits,
+  readCachedLimits,
+  writeCachedLimits,
+  reduceLimitsState,
+} from './claude-limits.js';
 
 /**
  * Live terminal view of token usage: Claude Code transcripts are tailed
@@ -79,7 +85,7 @@ async function main() {
       'codex-interval': { type: 'string', default: '30' },
       'no-codex': { type: 'boolean', default: false },
       'no-claude-limits': { type: 'boolean', default: false },
-      'claude-limits-interval': { type: 'string', default: '60' },
+      'claude-limits-interval': { type: 'string', default: '150' },
       'claude-dir': { type: 'string' },
       days: { type: 'string', default: '14' },
       once: { type: 'boolean', default: false },
@@ -87,6 +93,8 @@ async function main() {
       'codex-cmd': { type: 'string', default: 'codex' },
       'codex-args': { type: 'string', default: 'app-server' },
       'codex-home': { type: 'string' },
+      'no-codex-sessions': { type: 'boolean', default: false },
+      'codex-session-window': { type: 'string', default: '600' },
       help: { type: 'boolean', short: 'h', default: false },
     },
   });
@@ -100,15 +108,18 @@ Options:
   --codex-interval <s>  Codex app-server poll interval (default: 30)
   --no-codex            Claude transcripts only
   --no-claude-limits    Skip the Claude plan-limit fetch (OAuth usage endpoint)
-  --claude-limits-interval <s>  Claude limit poll interval (default: 60)
+  --claude-limits-interval <s>  Claude limit poll interval (default: 150)
   --claude-dir <dir>    Claude config dir (default: $CLAUDE_CONFIG_DIR or ~/.claude)
   --days <n>            Days in the sparklines (default: 14)
   --once                Render a single frame and exit
   --stream              Emit NDJSON snapshots instead of a TUI (for widgets)
   --codex-cmd <cmd>     Codex binary (default: codex)
   --codex-args <args>   Comma-separated args (default: app-server)
-  --codex-home <dir>    Codex home for the local same-day estimate
-                        (default: $CODEX_HOME or ~/.codex)
+  --codex-home <dir>    Codex home for the local same-day estimate and the
+                        per-session tailer (default: $CODEX_HOME or ~/.codex)
+  --no-codex-sessions   Skip the live per-session view (rollout tailing)
+  --codex-session-window <s>  A session counts as live while its rollout was
+                        written within this many seconds (default: 600)
   -h, --help            Show this help`);
     return;
   }
@@ -137,6 +148,22 @@ Options:
   const scanner = client
     ? new CodexSessionScanner(values['codex-home'] ? { codexHome: values['codex-home'] } : {})
     : null;
+  // Live per-session usage is read straight from the rollout files, so it works
+  // even when the app-server is unavailable (but not when Codex is disabled).
+  const watcher = !values['no-codex'] && !values['no-codex-sessions']
+    ? new SessionWatcher({
+        ...(values['codex-home'] && { codexHome: values['codex-home'] }),
+        activeWindow: Number(values['codex-session-window']),
+      })
+    : null;
+  const codexSessions = () => {
+    if (!watcher) return undefined;
+    try {
+      return watcher.poll();
+    } catch {
+      return []; // a transient read problem must not take the stream down
+    }
+  };
   const refreshCodex = async () => {
     if (!client) return;
     try {
@@ -146,14 +173,43 @@ Options:
     }
   };
 
+  // Resilient limits: the shared OAuth usage endpoint rate-limits hard (Claude
+  // Code, this widget and other tools all poll it), so a failed fetch must not
+  // blank the display. Keep the last-good windows (seeded from an on-disk cache
+  // at startup), surface them as `stale`, and back off exponentially on 429/5xx
+  // so we stop hammering a limit we've already hit.
+  const baseLimitsMs = Number(values['claude-limits-interval']) * 1000;
+  const maxBackoffMs = 15 * 60_000;
+  const limitsState = { last: null, fails: 0, nextAt: 0 };
   let claudeLimits = null;
+
+  const seedClaudeLimits = async () => {
+    if (values['no-claude-limits']) return;
+    const cached = await readCachedLimits();
+    if (cached) {
+      limitsState.last = cached;
+      claudeLimits = { ...cached, stale: true };
+    }
+  };
+
   const refreshClaudeLimits = async () => {
     if (values['no-claude-limits']) return;
+    if (Date.now() < limitsState.nextAt) return; // still backing off
+    let outcome;
     try {
-      claudeLimits = await readClaudeLimits();
+      outcome = { ok: true, windows: (await readClaudeLimits()).windows };
     } catch (err) {
-      claudeLimits = { error: err.message };
+      outcome = { ok: false, error: err };
     }
+    const now = Date.now();
+    const { state, limits, cache } = reduceLimitsState(limitsState, outcome, {
+      now,
+      baseMs: baseLimitsMs,
+      maxBackoffMs,
+    });
+    Object.assign(limitsState, state);
+    claudeLimits = limits;
+    if (cache) await writeCachedLimits(cache, { fetchedAt: now });
   };
 
   const claudeState = () => ({
@@ -165,6 +221,7 @@ Options:
       now: new Date(),
       claude: claudeState(),
       codex: values['no-codex'] ? undefined : codex,
+      codexSessions: codexSessions(),
       ansi,
       days,
       intervals: values.once
@@ -172,6 +229,7 @@ Options:
         : { claude: values.interval, codex: values['codex-interval'] },
     });
 
+  await seedClaudeLimits();
   await state.scanClaude();
   await Promise.all([refreshCodex(), refreshClaudeLimits()]);
 
@@ -189,6 +247,7 @@ Options:
             now: new Date(),
             claude: claudeState(),
             codex: values['no-codex'] ? undefined : codex,
+            codexSessions: codexSessions(),
           }),
         ),
       );

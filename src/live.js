@@ -164,9 +164,36 @@ function limitLine(name, window, now, { ansi }) {
  * format of `live-usage.js --stream`, consumed by the menu-bar widget.
  * Pure given its inputs.
  */
-export function buildSnapshot({ now = new Date(), claude, codex }) {
+/**
+ * Compact wire form of one live Codex session (from codex-session-watch's
+ * SessionWatcher.poll()). `label` is what a widget should print: the subagent's
+ * nickname, "Guardian review", or the project folder for a user thread.
+ */
+export function compactSession(s, now = new Date()) {
+  const nick = s.source?.startsWith('subagent:spawn/') ? s.source.slice('subagent:spawn/'.length) : null;
+  const guardian = s.source === 'subagent:guardian';
+  const folder = s.cwd ? s.cwd.split('/').filter(Boolean).pop() ?? s.cwd : null;
+  return {
+    id: s.id,
+    label: nick ?? (guardian ? 'Guardian review' : folder ?? s.source ?? s.id.slice(0, 8)),
+    kind: nick ? 'subagent' : guardian ? 'guardian' : 'user',
+    ...(s.cwd != null && { cwd: s.cwd }),
+    ...(s.model != null && { model: s.model }),
+    state: s.turnState,
+    ...(s.ctxUsedPercent != null && { ctxPercent: s.ctxUsedPercent }),
+    total: s.total?.total_tokens ?? null,
+    last: s.last?.total_tokens ?? null,
+    tokensPerMin: s.tokensPerMin ?? 0,
+    ...(s.lastEventTs != null && { lastEventAt: s.lastEventTs }),
+    ...(s.lastEventAgeSec != null && { ageSec: Math.round(s.lastEventAgeSec) }),
+    ...(s.resets ? { resets: s.resets } : {}),
+  };
+}
+
+export function buildSnapshot({ now = new Date(), claude, codex, codexSessions }) {
   const snapshot = { ts: now.toISOString() };
   if (claude) {
+    const cl = claude.limits;
     snapshot.claude = {
       perMinute: claude.perMinute,
       perFiveMinutes: claude.perFiveMinutes,
@@ -174,7 +201,18 @@ export function buildSnapshot({ now = new Date(), claude, codex }) {
       lifetime: claude.summary?.lifetimeTokens ?? 0,
       messages: claude.summary?.assistantMessages ?? 0,
       ...(claude.daily && { daily: claude.daily }),
-      ...(claude.limits?.windows?.length && { limits: claude.limits.windows }),
+      // Carry the last-good windows even when the latest fetch failed; the
+      // widget shows them dimmed (with `limitsAsOf`) rather than blanking to a
+      // dash. `limitsStale`/`limitsError` explain why they're not fresh.
+      ...(cl?.windows?.length && {
+        limits: cl.windows,
+        ...(cl.fetchedAt != null && { limitsAsOf: cl.fetchedAt }),
+        ...(cl.stale && { limitsStale: true }),
+        // Carry the reason alongside stale windows too, so the widget can say
+        // "sign in to refresh" instead of always "rate limited".
+        ...(cl.stale && cl.error && { limitsError: cl.error }),
+      }),
+      ...(!cl?.windows?.length && cl?.error && { limitsError: cl.error }),
     };
   }
   if (codex !== undefined) {
@@ -207,8 +245,24 @@ export function buildSnapshot({ now = new Date(), claude, codex }) {
         }),
       };
     }
+    // Live per-session usage comes from the local rollouts, so it is available
+    // even while the app-server is pending or unreachable.
+    if (codexSessions) snapshot.codex.sessions = codexSessions.map((x) => compactSession(x, now));
   }
   return snapshot;
+}
+
+/** "71%", "1.2M", "running" … one terminal line per live Codex session. */
+function sessionLine(s, { ansi }) {
+  const D = ansi ? '\x1b[2m' : '';
+  const R = ansi ? '\x1b[0m' : '';
+  const pct = s.ctxPercent;
+  let color = '';
+  if (ansi && pct != null) color = pct >= 70 ? '\x1b[31m' : pct >= 40 ? '\x1b[33m' : '\x1b[32m';
+  const ctx = pct == null ? '  —  ' : `${color}${String(pct).padStart(3)}%${R} `;
+  const state = s.state === 'running' ? (ansi ? '\x1b[32m●\x1b[0m running' : '● running') : `${D}${s.state}${R}`;
+  return `  ${s.label.slice(0, 18).padEnd(18)} ${D}ctx${R} ${ctx}${D}total${R} ${compact(s.total).padStart(6)}  ` +
+    `${compact(s.tokensPerMin).padStart(6)}${D}/min${R}  ${state}${s.model ? `  ${D}${s.model}${R}` : ''}`;
 }
 
 /**
@@ -216,7 +270,7 @@ export function buildSnapshot({ now = new Date(), claude, codex }) {
  * the caller owns screen management). Pure given `state`.
  */
 export function renderFrame(state) {
-  const { now = new Date(), claude, codex, ansi = true, days = 14, intervals } = state;
+  const { now = new Date(), claude, codex, ansi = true, days = 14, intervals } = state; // + codexSessions
   const B = ansi ? '\x1b[1m' : '';
   const D = ansi ? '\x1b[2m' : '';
   const R = ansi ? '\x1b[0m' : '';
@@ -273,6 +327,11 @@ export function renderFrame(state) {
     }
   } else {
     lines.push(`  ${D}waiting for first poll…${R}`);
+  }
+  if (codex !== undefined && state.codexSessions) {
+    const live = state.codexSessions.map((x) => compactSession(x, now));
+    lines.push(`  ${D}sessions${R}     ${live.length ? `${live.length} active ${D}(local rollouts)${R}` : `${D}none active${R}`}`);
+    for (const s of live) lines.push(sessionLine(s, { ansi }));
   }
   lines.push('');
   if (intervals) {

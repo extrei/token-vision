@@ -1,139 +1,65 @@
-# codex-usage
+# Token Vision
 
-Node.js clients that read account token usage for both CLI agents:
+Live token usage for **Claude Code** and **Codex**, in the terminal and in a
+macOS menu-bar widget. Zero dependencies, read-only, local only.
 
-- **Codex** — live from the `codex app-server` JSON-RPC method `account/usage/read`
-- **Claude Code** — aggregated offline from the local session transcripts in
-  `~/.claude/projects/**/*.jsonl` (there is no per-user usage API for Pro/Max
-  accounts: the `/usage` screen is interactive-only and the Admin/Analytics
-  usage APIs require an organization admin key)
+![preview](https://raw.githubusercontent.com/extrei/token-vision/main/docs/preview.png)
 
-## Usage
+## What it shows
 
-```sh
-node src/read-usage.js            # human-readable summary
-node src/read-usage.js --json     # raw JSON response
-node src/read-usage.js --thread-id <id>   # estimated usage for one thread
-node src/read-usage.js --codex /path/to/codex --timeout 10000
-```
+| | Claude Code | Codex |
+|---|---|---|
+| Today / lifetime tokens | from local transcripts | from `codex app-server` (plus a local same-day estimate, since the API lags) |
+| Plan limits | session / weekly windows with reset times | primary / secondary rate-limit windows |
+| Live rate | tokens per minute | tokens per minute per thread |
+| Current sessions | — | every running thread: context used, tokens, model, running / idle |
 
-Requires the `codex` CLI on `PATH` (tested with codex-cli 0.148.0) and an
-authenticated Codex account (`codex login`).
+## Quick start
 
-### Claude Code
+Requires Node ≥ 22. The Codex side needs the `codex` CLI on `PATH` and a
+ChatGPT login (`codex login`); the widget needs Xcode Command Line Tools.
 
 ```sh
-node src/read-claude-usage.js           # human-readable summary
-node src/read-claude-usage.js --json    # raw JSON report
-node src/read-claude-usage.js --claude-dir /path/to/.claude --days 30
+npm test                                  # unit tests (mock app-server)
+
+node src/live-usage.js                    # live terminal view, ctrl-c to quit
+node src/live-usage.js --once             # single frame
+node src/live-usage.js --stream           # NDJSON snapshots (what the widget consumes)
+
+node src/codex-session-watch.mjs          # live table of current Codex threads
+node src/codex-session-watch.mjs --stream # NDJSON, one object per change
+
+node src/read-usage.js --json             # Codex account usage (account/usage/read)
+node src/read-claude-usage.js --json      # Claude usage aggregated from transcripts
+
+sh widget/build.sh && ./widget/TokenVision &   # menu-bar widget; right-click to quit
 ```
 
-Reads `<claude-dir>/projects/**/*.jsonl` (default `$CLAUDE_CONFIG_DIR` or
-`~/.claude`) and produces the same shape as the Codex response: `summary`
-(lifetime/peak tokens, streaks, plus input/output/cache splits), UTC-bucketed
-`dailyUsageBuckets`, and a per-model breakdown. The scan is recursive: besides the session
-transcripts one level down, subagent transcripts nest deeper
-(`<project>/<session-id>/subagents/agent-*.jsonl`) and carry their own API
-usage — on an agent-heavy setup they hold roughly as many tokens as the main
-sessions, so skipping them undercounts lifetime by about half. Duplicated
-transcript lines (resumed/forked sessions rewrite the same API response up to
-a dozen times with byte-identical usage) are deduplicated by message id +
-request id; synthetic error placeholders are skipped. Caveats: local machine only, and the
-transcript format is internal to Claude Code and may change between versions.
+## How it works
 
-## Protocol
+- **Claude usage** is summed from `~/.claude/projects/**/*.jsonl` (subagent
+  transcripts included, duplicated lines deduplicated). **Plan limits** come
+  from the same OAuth usage endpoint Claude Code's `/usage` screen uses, with
+  the token from the keychain or `~/.claude/.credentials.json`.
+- **Codex account usage and rate limits** come from the `codex app-server`
+  JSON-RPC API (`account/usage/read`, `account/rateLimits/read`).
+- **Codex live sessions** are read by tailing the session rollouts under
+  `~/.codex/sessions/`: Codex appends a `token_count` line after every model
+  response with the thread's cumulative usage, the last call's size, the
+  context window and the rate-limit percent. Context used follows Codex's own
+  `/status` formula. The desktop app's app-server cannot be subscribed to from
+  outside, so the rollouts are the live source.
 
-`codex app-server` speaks JSON-RPC 2.0 as newline-delimited JSON over stdio
-(no Content-Length framing). The flow this client performs:
+## Caveats
 
-1. `initialize` request with `{ clientInfo: { name, version }, capabilities: { experimentalApi: true } }`
-   (`account/usage/read` is stable API, so the `experimentalApi` capability is optional)
-2. `initialized` notification
-3. `account/usage/read` request — params `{}` or `{ threadId: "..." }`
+- Everything is local to this machine; usage from other devices or cloud tasks
+  is invisible until the account API catches up.
+- Codex's per-thread total restarts when an idle thread is reloaded, and the
+  usage line lands only after a response's tool calls finish.
+- The transcript, rollout and usage-endpoint formats are internal to the two
+  CLIs and may change between versions (verified against Claude Code and
+  Codex 0.148–0.152).
 
-Requires ChatGPT-backed auth: without it the server answers with JSON-RPC error
-`-32600` ("codex account authentication required..." / "chatgpt authentication
-required to read token usage"). `-32001` means the server is overloaded (retry).
+## License
 
-The response shape (from `codex app-server generate-json-schema`):
-
-```jsonc
-{
-  "summary": {
-    "lifetimeTokens": 123,          // int64 | null
-    "peakDailyTokens": 123,         // int64 | null
-    "currentStreakDays": 1,         // int64 | null
-    "longestStreakDays": 1,         // int64 | null
-    "longestRunningTurnSec": 1      // int64 | null
-  },
-  "dailyUsageBuckets": [            // array | null
-    { "startDate": "2026-08-29", "tokens": 123 }
-  ],
-  "threadUsage": {                  // only when threadId was requested; else null
-    "threadId": "...",
-    "estimatedUsageCreditsMicros": 123,
-    "estimatedUsageUsdMicros": 123, // int64 | null
-    "groups": [ /* per-model token breakdown */ ]
-  }
-}
-```
-
-### Live terminal view
-
-```sh
-npm run live                       # repaints in place; ctrl-c to quit
-node src/live-usage.js --interval 2 --codex-interval 30 --days 14
-node src/live-usage.js --once      # single frame, no screen control
-node src/live-usage.js --no-codex  # Claude transcripts only
-```
-
-Tails the Claude transcripts incrementally (per-file byte offsets, partial-line
-buffering) for a live tokens-per-minute rate, and polls the Codex app-server for
-account usage plus `account/rateLimits/read` utilization (colored bar, reset
-time). Sparklines show the last N days per agent. Codex being unavailable or
-unauthenticated degrades to a note; the Claude side keeps running.
-
-**Claude plan limits**: the live views also show the `/usage`-style plan
-windows (session / weekly / weekly opus utilization with reset times), fetched
-the way Claude Code itself does — the OAuth usage endpoint
-(`api.anthropic.com/api/oauth/usage`) with the token from
-`$CLAUDE_CODE_OAUTH_TOKEN`, `~/.claude/.credentials.json`, or the macOS
-Keychain. This endpoint is not officially documented, so it degrades to a
-dim "limits unavailable" note on any failure; `--no-claude-limits` disables
-the fetch entirely and `--claude-limits-interval` tunes the poll (default 60s).
-
-**Codex "today" estimate**: the backend's `dailyUsageBuckets` lag behind and
-usually stop at yesterday, so live views fill today's bucket from the local
-session rollouts (`$CODEX_HOME/sessions/YYYY/MM/DD/rollout-*.jsonl`, summing
-`token_count` events' `last_token_usage.total_tokens` by event timestamp, with
-a 7-day directory lookback for long-running sessions). The shown value is
-`max(api, local)` and marked `~ (local estimate)` when the local floor wins —
-local rollouts can't see usage from other devices or cloud tasks (validated at
-95–97% of the API's figure for same-machine days). `--codex-home` overrides
-the rollout location.
-
-### Menu-bar widget (macOS)
-
-```sh
-sh widget/build.sh        # compiles widget/TokenVision (needs Xcode CLT)
-./widget/TokenVision &    # starburst button in the menu bar; right-click it to quit
-```
-
-A small native SwiftUI app that runs `node src/live-usage.js --stream` (NDJSON
-snapshots) and mirrors it live. A Claude-starburst button sits in the menu
-bar; clicking it slides a black tray out horizontally beneath it with one
-ring gauge per agent — Claude and Codex — showing the most-used plan-limit
-window, colored by severity (green < 40%, yellow < 70%, red). Hovering a ring
-opens a callout under it listing every window (`Current session`,
-`All models` / `Weekly`, …) with a bar, percent used, and the reset time
-(`Resets in 51 min`, `Resets Thu 12:00 AM`). Clicking anywhere else, or the
-button again, slides the tray back in. Right-click the button to quit. The
-streamer is relaunched automatically if it dies; pass a custom script path as
-the first argument if you move things around.
-
-## Tests
-
-```sh
-npm test                     # unit tests against a mock app-server on stdio
-CODEX_INTEGRATION=1 npm test # also hits the real codex app-server
-```
+MIT

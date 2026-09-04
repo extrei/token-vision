@@ -11,9 +11,15 @@ import { extractUsageEntry, defaultClaudeDir } from './claude-usage.js';
  */
 export class TranscriptTailer {
   #offsets = new Map(); // file -> { offset, remainder }
+  #extract;
 
-  constructor({ claudeDir = defaultClaudeDir() } = {}) {
-    this.projectsDir = join(claudeDir, 'projects');
+  /**
+   * Defaults to Claude Code transcripts. Pass `root` + `extract(line, file)`
+   * to tail another JSONL tree with the same offset bookkeeping (OMP sessions).
+   */
+  constructor({ claudeDir = defaultClaudeDir(), root, extract } = {}) {
+    this.projectsDir = root ?? join(claudeDir, 'projects');
+    this.#extract = extract ?? ((line) => extractUsageEntry(line, { timestamps: true }));
   }
 
   async #files() {
@@ -55,7 +61,7 @@ export class TranscriptTailer {
         state.offset = size;
         this.#offsets.set(file, state);
         for (const line of lines) {
-          const entry = extractUsageEntry(line, { timestamps: true });
+          const entry = this.#extract(line, file);
           if (entry) entries.push(entry);
         }
       } catch {
@@ -190,10 +196,32 @@ export function compactSession(s, now = new Date()) {
   };
 }
 
+/**
+ * Merge the Claude Code and OMP per-model breakdowns into one list, largest
+ * first, keeping the per-source split so the widget can show where the tokens
+ * came from. Pure.
+ */
+export function mergeModels(claudeCode = [], omp = []) {
+  const byModel = new Map();
+  const add = (list, source) => {
+    for (const m of list ?? []) {
+      const row = byModel.get(m.model) ?? { model: m.model, tokens: 0, messages: 0, claudeCode: 0, omp: 0 };
+      row.tokens += m.tokens ?? 0;
+      row.messages += m.messages ?? 0;
+      row[source] += m.tokens ?? 0;
+      byModel.set(m.model, row);
+    }
+  };
+  add(claudeCode, 'claudeCode');
+  add(omp, 'omp');
+  return [...byModel.values()].sort((a, b) => b.tokens - a.tokens);
+}
+
 export function buildSnapshot({ now = new Date(), claude, codex, codexSessions }) {
   const snapshot = { ts: now.toISOString() };
   if (claude) {
     const cl = claude.limits;
+    const models = mergeModels(claude.models, claude.omp?.models);
     snapshot.claude = {
       perMinute: claude.perMinute,
       perFiveMinutes: claude.perFiveMinutes,
@@ -201,6 +229,10 @@ export function buildSnapshot({ now = new Date(), claude, codex, codexSessions }
       lifetime: claude.summary?.lifetimeTokens ?? 0,
       messages: claude.summary?.assistantMessages ?? 0,
       ...(claude.daily && { daily: claude.daily }),
+      ...(models.length && { models }),
+      // Claude usage made through OMP (oh-my-pi): totals plus the sessions
+      // active right now. Same account, different client.
+      ...(claude.omp && { omp: claude.omp }),
       // Carry the last-good windows even when the latest fetch failed; the
       // widget shows them dimmed (with `limitsAsOf`) rather than blanking to a
       // dash. `limitsStale`/`limitsError` explain why they're not fresh.
@@ -288,6 +320,22 @@ export function renderFrame(state) {
     lines.push(row('rate', `${fmt(claude.perMinute)} tok/min ${D}(last 60s)${R}   ${fmt(claude.perFiveMinutes)} ${D}in last 5m${R}`));
     lines.push(row('lifetime', `${fmt(s.lifetimeTokens)}   ${D}messages${R} ${fmt(s.assistantMessages)}`));
     lines.push(row(`last ${days}d`, `${sparkline(claude.daily)}  ${D}peak ${compact(s.peakDailyTokens)}/day${R}`));
+    const models = mergeModels(claude.models, claude.omp?.models);
+    if (models.length) {
+      const top = models.slice(0, 4).map((m) => {
+        const split = m.claudeCode && m.omp ? ` ${D}(cc ${compact(m.claudeCode)} · omp ${compact(m.omp)})${R}` : '';
+        return `${m.model.replace(/^claude-/, '')} ${compact(m.tokens)}${split}`;
+      });
+      lines.push(row('by model', top.join('  ')));
+    }
+    if (claude.omp) {
+      const o = claude.omp;
+      const cost = o.costUsd ? `   ${D}cost${R} $${o.costUsd.toFixed(2)}` : '';
+      lines.push(row('omp', `${fmt(o.today)} today   ${D}total${R} ${fmt(o.lifetime)}   ${D}rate${R} ${fmt(o.perMinute)} tok/min${cost}`));
+      const live = o.sessions ?? [];
+      lines.push(`  ${D}omp sessions${R} ${live.length ? `${live.length} active ${D}(local sessions)${R}` : `${D}none active${R}`}`);
+      for (const x of live) lines.push(sessionLine(x, { ansi }));
+    }
     if (claude.limits?.windows) {
       for (const w of claude.limits.windows) {
         const line = limitLine(w.name, { usedPercent: w.usedPercent, resetsAt: w.resetsAt }, now, { ansi });

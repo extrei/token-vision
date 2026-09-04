@@ -5,6 +5,7 @@ import { AppServerClient } from './app-server-client.js';
 import { TranscriptTailer, RateWindow, renderFrame, buildSnapshot, lastNDays, todayTokens } from './live.js';
 import { CodexSessionScanner, localTodayTokens, overlayToday } from './codex-local.js';
 import { SessionWatcher } from './codex-session-watch.mjs';
+import { OmpLiveState } from './omp-usage.js';
 import {
   readClaudeLimits,
   readCachedLimits,
@@ -17,14 +18,27 @@ import {
  * incrementally every few seconds; the Codex app-server is polled for
  * account usage and rate limits on a slower interval.
  */
-export function createLiveState({ claudeDir, days = 14, now = () => new Date() } = {}) {
+export function createLiveState({
+  claudeDir,
+  days = 14,
+  now = () => new Date(),
+  omp = true,
+  ompDir,
+  ompSessionWindow = 600,
+} = {}) {
   const tailer = new TranscriptTailer(claudeDir ? { claudeDir } : {});
   const rate = new RateWindow();
   const entries = [];
   const rated = new Set();
+  const ompState = omp
+    ? new OmpLiveState({ ...(ompDir && { ompDir }), activeWindow: ompSessionWindow, now })
+    : null;
 
   return {
     async scanClaude() {
+      // OMP sessions are tailed on the same tick; a read problem there must
+      // not take the Claude Code side down.
+      if (ompState) await ompState.scan().catch(() => {});
       const fresh = await tailer.scan();
       const nowMs = now().getTime();
       for (const e of fresh) {
@@ -47,6 +61,8 @@ export function createLiveState({ claudeDir, days = 14, now = () => new Date() }
         daily: lastNDays(report.dailyUsageBuckets, days, t),
         perMinute: rate.tokensSince(60_000, t.getTime()),
         perFiveMinutes: rate.tokensSince(300_000, t.getTime()),
+        models: report.modelBreakdown,
+        ...(ompState && { omp: ompState.frame(t) }),
       };
     },
   };
@@ -95,6 +111,9 @@ async function main() {
       'codex-home': { type: 'string' },
       'no-codex-sessions': { type: 'boolean', default: false },
       'codex-session-window': { type: 'string', default: '600' },
+      'no-omp': { type: 'boolean', default: false },
+      'omp-dir': { type: 'string' },
+      'omp-session-window': { type: 'string', default: '600' },
       help: { type: 'boolean', short: 'h', default: false },
     },
   });
@@ -120,13 +139,23 @@ Options:
   --no-codex-sessions   Skip the live per-session view (rollout tailing)
   --codex-session-window <s>  A session counts as live while its rollout was
                         written within this many seconds (default: 600)
+  --no-omp              Skip Claude usage made through OMP (oh-my-pi)
+  --omp-dir <dir>       OMP home (default: $OMP_HOME or ~/.omp)
+  --omp-session-window <s>  An OMP session counts as current while its file
+                        was written within this many seconds (default: 600)
   -h, --help            Show this help`);
     return;
   }
 
   const days = Number(values.days);
   const ansi = process.stdout.isTTY ?? false;
-  const state = createLiveState({ claudeDir: values['claude-dir'], days });
+  const state = createLiveState({
+    claudeDir: values['claude-dir'],
+    days,
+    omp: !values['no-omp'],
+    ompDir: values['omp-dir'],
+    ompSessionWindow: Number(values['omp-session-window']),
+  });
   let codex = null;
   let client = null;
 

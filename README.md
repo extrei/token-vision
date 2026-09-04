@@ -1,7 +1,7 @@
 # Token Vision
 
-Live token usage for **Claude Code** and **Codex**, in the terminal and in a
-macOS menu-bar widget. Zero dependencies, read-only, local only.
+Live token usage for **Claude Code**, **OMP (oh-my-pi)** and **Codex**, in the
+terminal and in a macOS menu-bar widget. Zero dependencies, read-only, local only.
 
 ![preview](https://raw.githubusercontent.com/extrei/token-vision/main/docs/preview.png)
 
@@ -12,7 +12,9 @@ macOS menu-bar widget. Zero dependencies, read-only, local only.
 | Today / lifetime tokens | from local transcripts | from `codex app-server` (plus a local same-day estimate, since the API lags) |
 | Plan limits | session / weekly windows with reset times | primary / secondary rate-limit windows |
 | Live rate | tokens per minute | tokens per minute per thread |
-| Current sessions | — | every running thread: context used, tokens, model, running / idle |
+| Per model | lifetime tokens per Claude model, split Claude Code / OMP | — |
+| Current sessions | every OMP session active right now: tokens, cost, model, running / idle | every running thread: context used, tokens, model, running / idle |
+| OMP (oh-my-pi) | Claude tokens made through OMP: today, total, cost | — |
 
 ## Quick start
 
@@ -38,9 +40,18 @@ sh widget/build.sh && ./widget/TokenVision &   # menu-bar widget; right-click to
 ## How it works
 
 - **Claude usage** is summed from `~/.claude/projects/**/*.jsonl` (subagent
-  transcripts included, duplicated lines deduplicated). **Plan limits** come
-  from the same OAuth usage endpoint Claude Code's `/usage` screen uses, with
-  the token from the keychain or `~/.claude/.credentials.json`.
+  transcripts included, duplicated lines deduplicated).
+- **OMP usage** is summed from `~/.omp/agent/sessions/**/*.jsonl`: every
+  assistant turn carries `provider`, `model`, token usage and cost. Only Claude
+  turns count (OMP can route to other providers); they are broken down per model
+  next to the Claude Code numbers because both spend the same Claude account. A
+  session is "current" while its file was written in the last 10 minutes
+  (`--omp-session-window`) and "running" while a turn is in flight (last event
+  is a prompt, a tool call, or a tool-use stop). Subagent sessions nest under
+  their parent's folder and end with a `yield`. Disable with `--no-omp`.
+- **Plan limits** come from the same OAuth usage endpoint Claude Code's
+  `/usage` screen uses, with the token from the keychain or
+  `~/.claude/.credentials.json`.
 - **Codex account usage and rate limits** come from the `codex app-server`
   JSON-RPC API (`account/usage/read`, `account/rateLimits/read`).
 - **Codex live sessions** are read by tailing the session rollouts under
@@ -58,7 +69,7 @@ sh widget/build.sh && ./widget/TokenVision &   # menu-bar widget; right-click to
   usage line lands only after a response's tool calls finish.
 - The transcript, rollout and usage-endpoint formats are internal to the two
   CLIs and may change between versions (verified against Claude Code and
-  Codex 0.148–0.152).
+  Codex 0.148–0.152, OMP 18.1).
 
 ## License
 

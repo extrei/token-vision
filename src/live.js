@@ -175,16 +175,21 @@ function limitLine(name, window, now, { ansi }) {
  * SessionWatcher.poll()). `label` is what a widget should print: the subagent's
  * nickname, "Guardian review", or the project folder for a user thread.
  */
-export function compactSession(s, now = new Date()) {
+export function compactSession(s, now = new Date(), { titleOf } = {}) {
   const nick = s.source?.startsWith('subagent:spawn/') ? s.source.slice('subagent:spawn/'.length) : null;
   const guardian = s.source === 'subagent:guardian';
   const folder = s.cwd ? s.cwd.split('/').filter(Boolean).pop() ?? s.cwd : null;
+  const title = typeof titleOf === 'function' ? titleOf(s.id) ?? null : null;
   return {
     id: s.id,
     label: nick ?? (guardian ? 'Guardian review' : folder ?? s.source ?? s.id.slice(0, 8)),
     kind: nick ? 'subagent' : guardian ? 'guardian' : 'user',
+    ...(title && { title }),
     ...(s.cwd != null && { cwd: s.cwd }),
     ...(s.model != null && { model: s.model }),
+    // Where the thread is driven from — the desktop app / an IDE (no terminal
+    // to focus; the widget activates the app) or the CLI.
+    ...(s.originator != null && { originator: s.originator }),
     state: s.turnState,
     ...(s.ctxUsedPercent != null && { ctxPercent: s.ctxUsedPercent }),
     total: s.total?.total_tokens ?? null,
@@ -217,7 +222,7 @@ export function mergeModels(claudeCode = [], omp = []) {
   return [...byModel.values()].sort((a, b) => b.tokens - a.tokens);
 }
 
-export function buildSnapshot({ now = new Date(), claude, codex, codexSessions }) {
+export function buildSnapshot({ now = new Date(), claude, codex, codexSessions, codexTitle }) {
   const snapshot = { ts: now.toISOString() };
   if (claude) {
     const cl = claude.limits;
@@ -230,6 +235,9 @@ export function buildSnapshot({ now = new Date(), claude, codex, codexSessions }
       messages: claude.summary?.assistantMessages ?? 0,
       ...(claude.daily && { daily: claude.daily }),
       ...(models.length && { models }),
+      // Live Claude Code sessions from the process registry: name, busy/idle,
+      // terminal vs background job, and the web link for background jobs.
+      ...(claude.sessions?.length && { sessions: claude.sessions }),
       // Claude usage made through OMP (oh-my-pi): totals plus the sessions
       // active right now. Same account, different client.
       ...(claude.omp && { omp: claude.omp }),
@@ -279,7 +287,9 @@ export function buildSnapshot({ now = new Date(), claude, codex, codexSessions }
     }
     // Live per-session usage comes from the local rollouts, so it is available
     // even while the app-server is pending or unreachable.
-    if (codexSessions) snapshot.codex.sessions = codexSessions.map((x) => compactSession(x, now));
+    if (codexSessions) {
+      snapshot.codex.sessions = codexSessions.map((x) => compactSession(x, now, { titleOf: codexTitle }));
+    }
   }
   return snapshot;
 }

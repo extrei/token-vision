@@ -6,6 +6,8 @@ import { TranscriptTailer, RateWindow, renderFrame, buildSnapshot, lastNDays, to
 import { CodexSessionScanner, localTodayTokens, overlayToday } from './codex-local.js';
 import { SessionWatcher } from './codex-session-watch.mjs';
 import { OmpLiveState } from './omp-usage.js';
+import { ClaudeSessionRegistry, readProcessTable, appForTTY } from './claude-sessions.js';
+import { CodexTitles } from './codex-titles.js';
 import {
   readClaudeLimits,
   readCachedLimits,
@@ -25,6 +27,8 @@ export function createLiveState({
   omp = true,
   ompDir,
   ompSessionWindow = 600,
+  claudeSessions = true,
+  readTable = readProcessTable,
 } = {}) {
   const tailer = new TranscriptTailer(claudeDir ? { claudeDir } : {});
   const rate = new RateWindow();
@@ -33,12 +37,31 @@ export function createLiveState({
   const ompState = omp
     ? new OmpLiveState({ ...(ompDir && { ompDir }), activeWindow: ompSessionWindow, now })
     : null;
+  // Live Claude Code processes (name, busy/idle, terminal vs background job).
+  const registry = claudeSessions ? new ClaudeSessionRegistry(claudeDir ? { claudeDir } : {}) : null;
+  let sessions = [];
+  // One `ps` pass per tick, shared by the registry (tty + hosting app per
+  // Claude Code process) and the OMP side (hosting app of the `omp` on a pty).
+  let table = null;
+
+  // OMP only records the pty a session runs on; resolve the terminal app that
+  // owns the `omp` process there (nothing if the session has exited).
+  const withOmpApps = (frame) => ({
+    ...frame,
+    sessions: (frame.sessions ?? []).map((s) => {
+      if (s.app || !s.tty) return s;
+      const app = appForTTY(s.tty, table, 'omp');
+      return app ? { ...s, app } : s;
+    }),
+  });
 
   return {
     async scanClaude() {
       // OMP sessions are tailed on the same tick; a read problem there must
       // not take the Claude Code side down.
       if (ompState) await ompState.scan().catch(() => {});
+      if (registry || ompState) table = await readTable().catch(() => table);
+      if (registry) sessions = await registry.scan(table ?? undefined).catch(() => sessions);
       const fresh = await tailer.scan();
       const nowMs = now().getTime();
       for (const e of fresh) {
@@ -62,7 +85,8 @@ export function createLiveState({
         perMinute: rate.tokensSince(60_000, t.getTime()),
         perFiveMinutes: rate.tokensSince(300_000, t.getTime()),
         models: report.modelBreakdown,
-        ...(ompState && { omp: ompState.frame(t) }),
+        ...(ompState && { omp: withOmpApps(ompState.frame(t)) }),
+        ...(registry && { sessions }),
       };
     },
   };
@@ -112,6 +136,7 @@ async function main() {
       'no-codex-sessions': { type: 'boolean', default: false },
       'codex-session-window': { type: 'string', default: '600' },
       'no-omp': { type: 'boolean', default: false },
+      'no-claude-sessions': { type: 'boolean', default: false },
       'omp-dir': { type: 'string' },
       'omp-session-window': { type: 'string', default: '600' },
       help: { type: 'boolean', short: 'h', default: false },
@@ -140,6 +165,7 @@ Options:
   --codex-session-window <s>  A session counts as live while its rollout was
                         written within this many seconds (default: 600)
   --no-omp              Skip Claude usage made through OMP (oh-my-pi)
+  --no-claude-sessions  Skip the live Claude Code process list (~/.claude/sessions)
   --omp-dir <dir>       OMP home (default: $OMP_HOME or ~/.omp)
   --omp-session-window <s>  An OMP session counts as current while its file
                         was written within this many seconds (default: 600)
@@ -155,6 +181,7 @@ Options:
     omp: !values['no-omp'],
     ompDir: values['omp-dir'],
     ompSessionWindow: Number(values['omp-session-window']),
+    claudeSessions: !values['no-claude-sessions'],
   });
   let codex = null;
   let client = null;
@@ -185,13 +212,24 @@ Options:
         activeWindow: Number(values['codex-session-window']),
       })
     : null;
+  // Human titles for Codex threads come from Codex's state DB (read-only);
+  // refreshed on a slow cadence for whichever threads the tailer currently sees.
+  const titles = watcher ? new CodexTitles() : null;
+  let lastCodexIds = [];
   const codexSessions = () => {
     if (!watcher) return undefined;
     try {
-      return watcher.poll();
+      const list = watcher.poll();
+      lastCodexIds = list.map((s) => s.id);
+      return list;
     } catch {
       return []; // a transient read problem must not take the stream down
     }
+  };
+  const codexTitle = titles ? (id) => titles.get(id) : undefined;
+  const refreshCodexTitles = async () => {
+    if (!titles) return;
+    await titles.refresh(lastCodexIds).catch(() => {});
   };
   const refreshCodex = async () => {
     if (!client) return;
@@ -260,10 +298,12 @@ Options:
 
   await seedClaudeLimits();
   await state.scanClaude();
-  await Promise.all([refreshCodex(), refreshClaudeLimits()]);
+  codexSessions(); // prime the id list so the first title refresh has targets
+  await Promise.all([refreshCodex(), refreshClaudeLimits(), refreshCodexTitles()]);
 
   if (values.once) {
     console.log(frame());
+    titles?.close();
     await client?.close();
     return;
   }
@@ -277,6 +317,7 @@ Options:
             claude: claudeState(),
             codex: values['no-codex'] ? undefined : codex,
             codexSessions: codexSessions(),
+            codexTitle,
           }),
         ),
       );
@@ -290,10 +331,13 @@ Options:
       refreshClaudeLimits,
       Number(values['claude-limits-interval']) * 1000,
     );
+    const streamTitlesTimer = setInterval(refreshCodexTitles, 30_000);
     const stop = async () => {
       clearInterval(streamTimer);
       clearInterval(streamCodexTimer);
       clearInterval(streamLimitsTimer);
+      clearInterval(streamTitlesTimer);
+      titles?.close();
       await client?.close();
       process.exit(0);
     };

@@ -1,4 +1,5 @@
 import { join, basename, dirname, relative, sep } from 'node:path';
+import { readdir, readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { summarize } from './claude-usage.js';
 import { TranscriptTailer, RateWindow } from './live.js';
@@ -145,12 +146,41 @@ export class OmpTailer {
       return null;
     }
     const { id, kind, label, parent, cwd } = meta;
-    return { ...ev, sessionId: id, sessionKind: kind, sessionLabel: label, parent, cwd };
+    return { ...ev, sessionId: id, sessionKind: kind, sessionLabel: label, parent, cwd, path: file };
   }
 
   scan() {
     return this.#tailer.scan();
   }
+}
+
+/**
+ * OMP records which pty each session runs on in
+ * `<ompDir>/agent/terminal-sessions/<tty>` (line 1: cwd, line 2: the session
+ * file path). Returns session-file-path -> tty (e.g. "ttys004"). Files linger
+ * after the session exits, so this says where a session *was*; whether an
+ * `omp` process is still on that tty is for the caller to check.
+ */
+export async function readOmpTerminalSessions(ompDir = defaultOmpDir()) {
+  const dir = join(ompDir, 'agent', 'terminal-sessions');
+  const out = new Map();
+  let names;
+  try {
+    names = await readdir(dir);
+  } catch {
+    return out;
+  }
+  for (const tty of names) {
+    if (!/^ttys?\d+$/.test(tty)) continue;
+    try {
+      const lines = (await readFile(join(dir, tty), 'utf8')).split('\n');
+      const path = (lines[1] ?? '').trim();
+      if (path) out.set(path, tty);
+    } catch {
+      /* unreadable — skip */
+    }
+  }
+  return out;
 }
 
 const folderName = (cwd) => (cwd ? cwd.split('/').filter(Boolean).pop() ?? cwd : null);
@@ -167,9 +197,12 @@ export class OmpLiveState {
   #sessions = new Map();
   #rate = new RateWindow();
   #rated = new Set();
+  #ompDir;
+  #ttyByPath = new Map();
   activeWindow;
 
   constructor({ ompDir, activeWindow = 600, now = () => new Date() } = {}) {
+    this.#ompDir = ompDir ?? defaultOmpDir();
     this.#tailer = new OmpTailer(ompDir ? { ompDir } : {});
     this.#now = now;
     this.activeWindow = activeWindow;
@@ -179,6 +212,8 @@ export class OmpLiveState {
     const fresh = await this.#tailer.scan();
     const nowMs = this.#now().getTime();
     for (const ev of fresh) this.#apply(ev, nowMs);
+    // Refresh the pty map alongside; a failure here must not stop the tail.
+    this.#ttyByPath = await readOmpTerminalSessions(this.#ompDir).catch(() => this.#ttyByPath);
     return fresh.length;
   }
 
@@ -191,6 +226,7 @@ export class OmpLiveState {
         label: ev.sessionLabel ?? null,
         parent: ev.parent ?? null,
         cwd: ev.cwd,
+        path: ev.path ?? null,
         model: null,
         lastEventMs: 0,
         awaiting: false,
@@ -249,6 +285,8 @@ export class OmpLiveState {
         kind: s.kind,
         ...(s.parent != null && { parent: s.parent }),
         ...(s.cwd != null && { cwd: s.cwd }),
+        ...(s.path != null && { path: s.path }),
+        ...(s.path != null && this.#ttyByPath.has(s.path) && { tty: this.#ttyByPath.get(s.path) }),
         ...(s.model != null && { model: s.model }),
         state: s.awaiting ? 'running' : 'idle',
         total: s.tokens,

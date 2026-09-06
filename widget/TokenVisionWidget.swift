@@ -1170,9 +1170,13 @@ enum SessionOpener {
             }
             openInTerminal("omp -r \(shellQuote(s.id))", cwd: s.cwd)
         default:
-            let origin = (s.originator ?? "").lowercased()
-            if origin.contains("desktop") || origin.contains("vscode") || origin.contains("code") {
-                if activate(bundleId: "com.openai.codex") { return }
+            // The Codex app opens a thread by id (`codex://threads/<id>`); it lists
+            // CLI threads too, so the deep link is the best target whenever the
+            // app is installed. Otherwise fall back to the terminal / `codex resume`.
+            if HostApp.path(bundleId: "com.openai.codex") != nil,
+               let u = URL(string: "codex://threads/\(s.id)") {
+                NSWorkspace.shared.open(u)
+                return
             }
             if let tty = s.tty, focusTerminal(tty: tty, app: s.app) { return }
             openInTerminal("codex resume \(shellQuote(s.id))", cwd: s.cwd)
@@ -1265,11 +1269,10 @@ enum SessionOpener {
         return false
     }
 
+    /// Bring an installed app forward. Always goes through LaunchServices:
+    /// `NSRunningApplication.activate` is refused when the caller isn't the
+    /// active app (this accessory never is), and silently does nothing.
     static func activate(bundleId: String) -> Bool {
-        if let running = NSRunningApplication.runningApplications(withBundleIdentifier: bundleId).first {
-            running.activate(options: [.activateIgnoringOtherApps])
-            return true
-        }
         guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleId) else { return false }
         NSWorkspace.shared.openApplication(at: url, configuration: NSWorkspace.OpenConfiguration(),
                                            completionHandler: nil)

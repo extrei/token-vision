@@ -5,6 +5,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   extractTokenCountEvent,
+  isReemission,
+  tokensByDate,
   CodexSessionScanner,
   localTodayTokens,
   overlayToday,
@@ -56,7 +58,7 @@ test('extractTokenCountEvent: valid rollout line yields exact date and last_toke
     '"last_token_usage":{"input_tokens":29450,"cached_input_tokens":26368,"cache_write_input_tokens":0,' +
     '"output_tokens":276,"reasoning_output_tokens":107,"total_tokens":29726},' +
     '"model_context_window":258400},"rate_limits":{"primary":{"used_percent":3}}}}';
-  assert.deepEqual(extractTokenCountEvent(line), { date: '2026-08-30', tokens: 29726 });
+  assert.deepEqual(extractTokenCountEvent(line), { date: '2026-08-30', tokens: 29726, total: 1900 });
 });
 
 test('extractTokenCountEvent: line without the "token_count" substring -> null', () => {
@@ -313,4 +315,95 @@ test('buildSnapshot: todayEstimated key present only when true', () => {
 
   const absent = buildSnapshot({ now: NOW, codex: { today: 5, summary: {} } });
   assert.ok(!('todayEstimated' in absent.codex));
+});
+
+// ---------------------------------------------------------------- re-emitted token_count events
+
+/** token_count line with its own size (`last`) and the thread's cumulative counter (`total`). */
+const usageLine = (timestamp, last, total) =>
+  JSON.stringify({
+    timestamp,
+    type: 'event_msg',
+    payload: {
+      type: 'token_count',
+      info: {
+        ...(total !== undefined && { total_token_usage: { total_tokens: total } }),
+        last_token_usage: { total_tokens: last },
+        model_context_window: 258_400,
+      },
+      rate_limits: {},
+    },
+  });
+const at = (hms) => `${TODAY}T${hms}.000Z`;
+
+test('extractTokenCountEvent: total is the cumulative counter, null when the line has none', () => {
+  assert.deepEqual(extractTokenCountEvent(usageLine(at('09:00:00'), 500, 1500)), { date: TODAY, tokens: 500, total: 1500 });
+  assert.deepEqual(extractTokenCountEvent(usageLine(at('09:00:00'), 500)), { date: TODAY, tokens: 500, total: null });
+});
+
+test('isReemission: same (last, total) as the previous event; never without a total or a previous event', () => {
+  const ev = (tokens, total) => ({ date: TODAY, tokens, total });
+  assert.equal(isReemission(ev(500, 1500), ev(500, 1500)), true);
+  assert.equal(isReemission(ev(500, 2000), ev(500, 1500)), false); // same size, counter moved: a real response
+  assert.equal(isReemission(ev(400, 1500), ev(500, 1500)), false);
+  assert.equal(isReemission(ev(500, null), ev(500, null)), false); // can't be told apart: count it
+  assert.equal(isReemission(ev(500, 1500), null), false);
+});
+
+test('tokensByDate: a verbatim re-emission is summed once (compaction / settings / rate-limit refresh)', () => {
+  // Shape from a real rollout: runs like [40625, 40625, 40625] with an unchanged cumulative total.
+  const text = [
+    usageLine(at('09:00:00'), 40_000, 40_000),
+    usageLine(at('09:01:00'), 40_625, 80_625),
+    usageLine(at('09:01:30'), 40_625, 80_625), // re-emitted
+    usageLine(at('09:02:10'), 40_625, 80_625), // re-emitted again
+    '{"timestamp":"' + at('09:02:20') + '","type":"event_msg","payload":{"type":"thread_settings_applied"}}',
+    usageLine(at('09:03:00'), 47_716, 128_341),
+    usageLine(at('09:03:05'), 47_716, 128_341), // re-emitted
+  ].join('\n');
+  assert.equal(tokensByDate(text).get(TODAY), 40_000 + 40_625 + 47_716);
+});
+
+test('tokensByDate: equal-sized consecutive responses, counter resets and total-less lines all count', () => {
+  const text = [
+    usageLine(at('10:00:00'), 5_000, 5_000),
+    usageLine(at('10:01:00'), 5_000, 10_000), // same size, counter moved
+    usageLine(at('10:02:00'), 3_000, 3_000),  // thread reloaded: counter restarted
+    usageLine(at('10:03:00'), 700),           // no cumulative total on the line
+    usageLine(at('10:04:00'), 700),           // …so an identical one still counts
+  ].join('\n');
+  assert.equal(tokensByDate(text).get(TODAY), 5_000 + 5_000 + 3_000 + 700 + 700);
+});
+
+test('tokensByDate: a re-emission across midnight is dropped, not moved to the next day', () => {
+  const text = [
+    usageLine(`${YESTERDAY}T23:59:50.000Z`, 900, 900),
+    usageLine(`${TODAY}T00:00:05.000Z`, 900, 900), // re-emitted after midnight
+    usageLine(`${TODAY}T00:01:00.000Z`, 100, 1_000),
+  ].join('\n');
+  const byDate = tokensByDate(text);
+  assert.equal(byDate.get(YESTERDAY), 900);
+  assert.equal(byDate.get(TODAY), 100);
+});
+
+test('CodexSessionScanner: re-emissions in a rollout file do not inflate today (and the floor stays a floor)', async (t) => {
+  const home = await mkdtemp(join(tmpdir(), 'codex-reemit-'));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const dir = join(home, 'sessions', ...TODAY.split('-'));
+  await mkdir(dir, { recursive: true });
+  const file = join(dir, 'rollout-2026-08-30T09-00-00-aaaa.jsonl');
+  await writeFile(file, [
+    usageLine(at('09:00:00'), 1_000, 1_000),
+    usageLine(at('09:00:10'), 1_000, 1_000), // re-emitted
+    usageLine(at('09:05:00'), 2_000, 3_000),
+  ].join('\n') + '\n');
+  const scanner = new CodexSessionScanner({ codexHome: home });
+  assert.equal(await scanner.todayTokens(NOW), 3_000);
+  // The file grows by one more re-emission and one real response: still each once.
+  await appendFile(file, [usageLine(at('09:05:20'), 2_000, 3_000), usageLine(at('09:06:00'), 500, 3_500)].join('\n') + '\n');
+  assert.equal(await scanner.todayTokens(NOW), 3_500);
+  // An API bucket that already holds the truth is not overridden by the local figure.
+  const { today, todayEstimated } = overlayToday([{ startDate: TODAY, tokens: 3_600 }], 3_500, NOW);
+  assert.equal(today, 3_600);
+  assert.equal(todayEstimated, false);
 });

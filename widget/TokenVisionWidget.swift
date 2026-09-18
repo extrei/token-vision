@@ -1,6 +1,7 @@
 // Token Vision — a macOS menu-bar widget showing plan-limit usage.
 //
-// A status-bar button (a cat) toggles a black tray that unfurls
+// A status-bar button (a cat) toggles a tray (Liquid Glass on macOS 26+, else
+// solid black; right-click the button to switch) that unfurls
 // downward from the menu bar, centered under the button, with one ring gauge
 // per agent: Claude and Codex. The ring shows the most-used limit window;
 // hovering a ring opens a callout listing every window (session / weekly) with
@@ -160,6 +161,9 @@ enum Palette {
     static let mid = rgb(0xDDF247)
     static let high = rgb(0xFF3B30)
     static let track = Color.white.opacity(0.16)
+    /// Darkens the Liquid Glass a little so the white text holds up over a
+    /// bright wallpaper. One knob: 0 is plain system glass, higher is smokier.
+    static let glassTint = Color.black.opacity(0.30)
 
     static func severity(_ percent: Int) -> Color {
         percent >= 70 ? high : percent >= 40 ? mid : low
@@ -486,6 +490,21 @@ final class Model: ObservableObject {
     @Published var finishedAt: [String: Date] = [:]
     /// Fired on the main thread when a session transitions running -> idle.
     var onFinished: ((LiveSession) -> Void)?
+    /// Liquid Glass panels (macOS 26+) instead of solid black; toggled from the
+    /// status item's right-click menu and remembered across launches.
+    @Published var useGlass: Bool = Model.glassAvailable
+        && (UserDefaults.standard.object(forKey: "liquidGlass") as? Bool ?? true)
+    /// Apple's background extension effect on the tray's rings (macOS 26+): see
+    /// `EdgeExtension`. Off unless switched on from the same menu; remembered.
+    @Published var useExtension: Bool = Model.glassAvailable
+        && UserDefaults.standard.bool(forKey: "backgroundExtension")
+
+    static var glassAvailable: Bool {
+        #if compiler(>=6.2)
+        if #available(macOS 26.0, *) { return true }
+        #endif
+        return false
+    }
 
     /// Last non-empty windows per agent, so a snapshot that arrives without
     /// limits (endpoint down / rate limited before the on-disk cache seeded)
@@ -644,6 +663,116 @@ struct RingView: View {
     }
 }
 
+/// Set by `--render`: offscreen rendering can't draw a real backdrop material,
+/// so panels use a translucent stand-in there.
+var offscreenRender = false
+
+/// The panel material behind the tray and the callouts, in `shape`.
+/// - Liquid Glass (macOS 26+): the system material, dark variant with a light
+///   tint. It follows the shape exactly, so the tray's concave shoulders and the
+///   callout's pointer are part of the glass. `appearsActive` keeps it from
+///   going flat in these panels, which never become key.
+/// - Otherwise solid black, the original look.
+struct PanelBackground<S: Shape>: ViewModifier {
+    let shape: S
+    let glass: Bool
+
+    func body(content: Content) -> some View {
+        if offscreenRender && glass {
+            // Stand-in for previews: see-through smoked fill with a lit top edge.
+            content.background {
+                shape.fill(LinearGradient(colors: [Color.black.opacity(0.44), Color.black.opacity(0.58)],
+                                          startPoint: .top, endPoint: .bottom))
+                    .overlay(shape.stroke(LinearGradient(colors: [Color.white.opacity(0.42), Color.white.opacity(0.10)],
+                                                         startPoint: .top, endPoint: .bottom), lineWidth: 1))
+            }
+        } else if glass {
+            liquidGlass(content)
+        } else {
+            content.background(shape.fill(Color.black))
+        }
+    }
+
+    @ViewBuilder private func liquidGlass(_ content: Content) -> some View {
+        #if compiler(>=6.2)
+        if #available(macOS 26.0, *) {
+            content
+                .glassEffect(Glass.regular.tint(Palette.glassTint), in: shape)
+                .environment(\.colorScheme, .dark)
+                .environment(\.appearsActive, true)
+        } else {
+            content.background(shape.fill(Color.black))
+        }
+        #else
+        content.background(shape.fill(Color.black))
+        #endif
+    }
+}
+
+/// Pads `content` by `insets`. With `enabled` (macOS 26+) that padding is safe
+/// area and the content gets Apple's `backgroundExtensionEffect()`: mirrored
+/// copies of it fill the margin out to the panel's edge under a system blur, so
+/// the rings' colors bleed to the rim. Clipped to `shape`, as the copies overrun.
+///
+/// The effect is made for opaque content that fills a window (a hero image
+/// running under a sidebar). On this floating panel its blur also takes in the
+/// desktop around the tray, which softens the outline and frosts the margin a
+/// shade lighter than the glass — so it is opt-in.
+struct EdgeExtension<S: Shape>: ViewModifier {
+    let insets: EdgeInsets
+    let shape: S
+    let enabled: Bool
+
+    func body(content: Content) -> some View {
+        #if compiler(>=6.2)
+        if #available(macOS 26.0, *), enabled, !offscreenRender {
+            content
+                .backgroundExtensionEffect()
+                .safeAreaPadding(insets)
+                .clipShape(shape)
+        } else {
+            content.padding(insets)
+        }
+        #else
+        content.padding(insets)
+        #endif
+    }
+}
+
+/// Callout outline: a rounded bubble with its upward pointer as one closed
+/// path, so a material fills both without a seam. `pointerOffset` shifts the
+/// pointer from the horizontal center (the bubble may be clamped on screen).
+struct CalloutShape: Shape {
+    var pointerOffset: CGFloat = 0
+    static let pointerWidth: CGFloat = 24
+    static let cornerRadius: CGFloat = 20
+
+    func path(in r: CGRect) -> Path {
+        let ph = Layout.calloutPointer, pw = Self.pointerWidth, cr = Self.cornerRadius
+        let top = r.minY + ph // the bubble's top edge; the pointer rises above it
+        let cx = min(max(r.midX + pointerOffset, r.minX + cr + pw / 2), r.maxX - cr - pw / 2)
+        var p = Path()
+        p.move(to: CGPoint(x: r.minX + cr, y: top))
+        p.addLine(to: CGPoint(x: cx - pw / 2, y: top))
+        p.addLine(to: CGPoint(x: cx, y: r.minY))
+        p.addLine(to: CGPoint(x: cx + pw / 2, y: top))
+        p.addLine(to: CGPoint(x: r.maxX - cr, y: top))
+        p.addArc(center: CGPoint(x: r.maxX - cr, y: top + cr), radius: cr,
+                 startAngle: .degrees(-90), endAngle: .degrees(0), clockwise: false)
+        p.addLine(to: CGPoint(x: r.maxX, y: r.maxY - cr))
+        p.addArc(center: CGPoint(x: r.maxX - cr, y: r.maxY - cr), radius: cr,
+                 startAngle: .degrees(0), endAngle: .degrees(90), clockwise: false)
+        p.addLine(to: CGPoint(x: r.minX + cr, y: r.maxY))
+        p.addArc(center: CGPoint(x: r.minX + cr, y: r.maxY - cr), radius: cr,
+                 startAngle: .degrees(90), endAngle: .degrees(180), clockwise: false)
+        p.addLine(to: CGPoint(x: r.minX, y: top + cr))
+        p.addArc(center: CGPoint(x: r.minX + cr, y: top + cr), radius: cr,
+                 startAngle: .degrees(180), endAngle: .degrees(270), clockwise: false)
+        p.closeSubpath()
+        return p
+    }
+}
+
 /// Tray body: straight top edge with concave shoulders, rounded bottom corners.
 struct TrayShape: Shape {
     func path(in r: CGRect) -> Path {
@@ -671,6 +800,7 @@ struct TrayView: View {
     var body: some View {
         let rings = model.snapshot?.rings ?? []
         let open = model.open
+        let glass = model.useGlass
         HStack(spacing: Layout.columnGap) {
             if rings.isEmpty {
                 ProgressView().controlSize(.small).tint(.white)
@@ -678,17 +808,24 @@ struct TrayView: View {
             }
             ForEach(rings) { RingView(ring: $0) }
         }
-        .padding(.top, Layout.padTop)
-        .padding(.bottom, Layout.padBottom)
-        .padding(.horizontal, Layout.shoulder + Layout.padSide)
-        .background(TrayShape().fill(Color.black))
-        .shadow(color: .black.opacity(0.34), radius: 16, x: 0, y: 7)
+        // Glass: fade the rings, never the material. A backdrop under group
+        // opacity can't sample what's behind the window, so a fading glass would
+        // be flat until it snapped to real glass at the end.
+        .opacity(glass && !open ? 0 : 1)
+        .modifier(EdgeExtension(insets: EdgeInsets(top: Layout.padTop, leading: Layout.shoulder + Layout.padSide,
+                                                   bottom: Layout.padBottom, trailing: Layout.shoulder + Layout.padSide),
+                                shape: TrayShape(), enabled: model.useExtension))
+        .modifier(PanelBackground(shape: TrayShape(), glass: glass))
+        // The glass brings its own shadow; the solid fill needs one.
+        .shadow(color: .black.opacity(glass ? 0 : 0.34), radius: 16, x: 0, y: 7)
         // Cross-fade rings as the agent set changes (Claude-only -> +Codex).
         .animation(.easeInOut(duration: 0.25), value: rings.count)
         // Unfurl downward from the menu bar: grow vertically from the top edge
-        // and fade in. Deterministic GPU transform — no window-frame animation.
-        .scaleEffect(x: 1, y: open ? 1 : 0.02, anchor: .top)
-        .opacity(open ? 1 : 0)
+        // (and fade in, for the solid fill). Deterministic GPU transform — no
+        // window-frame animation. Closed glass is a 0.1 pt sliver for the few
+        // milliseconds before the window is ordered out.
+        .scaleEffect(x: 1, y: open ? 1 : (glass ? 0.001 : 0.02), anchor: .top)
+        .opacity(glass || open ? 1 : 0)
         .animation(.spring(response: 0.32, dampingFraction: 0.84), value: open)
     }
 }
@@ -1027,18 +1164,6 @@ struct OmpSection: View {
     }
 }
 
-/// Upward-pointing triangle.
-struct CalloutPointer: Shape {
-    func path(in r: CGRect) -> Path {
-        var p = Path()
-        p.move(to: CGPoint(x: r.minX, y: r.maxY))
-        p.addLine(to: CGPoint(x: r.midX, y: r.minY))
-        p.addLine(to: CGPoint(x: r.maxX, y: r.maxY))
-        p.closeSubpath()
-        return p
-    }
-}
-
 struct CalloutView: View {
     let ring: Ring
     /// Horizontal shift of the pointer from the bubble's center (points at the
@@ -1065,10 +1190,6 @@ struct CalloutView: View {
     var body: some View {
         let live = ring.liveSessions
         VStack(spacing: 0) {
-            CalloutPointer()
-                .fill(Color.black)
-                .frame(width: 24, height: Layout.calloutPointer)
-                .offset(x: pointerOffset)
             VStack(alignment: .leading, spacing: 14) {
                 HStack(spacing: 8) {
                     AgentMark(agent: ring.agent).frame(width: 18, height: 18)
@@ -1109,7 +1230,8 @@ struct CalloutView: View {
             }
             .padding(16)
             .frame(width: Layout.calloutWidth, alignment: .leading)
-            .background(RoundedRectangle(cornerRadius: 20, style: .continuous).fill(Color.black))
+            .padding(.top, Layout.calloutPointer) // room for the pointer, part of the outline
+            .modifier(PanelBackground(shape: CalloutShape(pointerOffset: pointerOffset), glass: model.useGlass))
         }
         .fixedSize()
         // Subtle grow-in; the window's alpha handles the fade.
@@ -1575,6 +1697,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc func statusClicked() {
         if NSApp.currentEvent?.type == .rightMouseUp {
             let menu = NSMenu()
+            if Model.glassAvailable {
+                let glass = NSMenuItem(title: "Liquid Glass", action: #selector(toggleGlass), keyEquivalent: "")
+                glass.target = self
+                glass.state = model.useGlass ? .on : .off
+                menu.addItem(glass)
+                let ext = NSMenuItem(title: "Background Extension", action: #selector(toggleExtension), keyEquivalent: "")
+                ext.target = self
+                ext.state = model.useExtension ? .on : .off
+                menu.addItem(ext)
+                menu.addItem(.separator())
+            }
             menu.addItem(NSMenuItem(title: "Quit Token Vision", action: #selector(quit), keyEquivalent: "q"))
             item.menu = menu
             item.button?.performClick(nil)
@@ -1765,6 +1898,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         SessionOpener.open(s)
     }
 
+    /// Switch the panels between Liquid Glass and solid black (remembered).
+    @objc func toggleGlass() {
+        model.useGlass.toggle()
+        UserDefaults.standard.set(model.useGlass, forKey: "liquidGlass")
+        refreshCalloutIfShown()
+    }
+
+    /// Switch the tray's background extension effect on or off (remembered).
+    @objc func toggleExtension() {
+        model.useExtension.toggle()
+        UserDefaults.standard.set(model.useExtension, forKey: "backgroundExtension")
+    }
+
     @objc func quit() {
         quitting = true
         proc?.terminate()
@@ -1856,13 +2002,19 @@ extension Array {
     subscript(safe i: Int) -> Element? { indices.contains(i) ? self[i] : nil }
 }
 
-// MARK: - Headless preview render (`TokenVision --render [outDir | file.png]`)
+// MARK: - Preview render (`TokenVision --render [outDir | file.png] [--offscreen]`)
 //
-// Renders the real views offscreen into the README image: two menu-bar scenes
-// (hovering the Claude ring, hovering the Codex ring) plus the states that a
-// screenshot rarely catches. Needs no Screen Recording permission or live
-// click, and doubles as a visual check. Always 2x, whatever display the process
-// happens to see. Sample data is invented. Not used in normal operation.
+// Renders the real views into the README image: two menu-bar scenes (hovering
+// the Claude ring, hovering the Codex ring) plus the states that a screenshot
+// rarely catches. Sample data is invented. Not used in normal operation.
+//
+// With Liquid Glass the scene goes up in a window of its own for a second and
+// that window alone is captured, because only the window server can draw the
+// material; it lands on the sharpest display, so 2x where there is one. No
+// Screen Recording permission is involved (a process may capture its own
+// windows) and nothing else on screen can end up in the image. Without glass,
+// or with `--offscreen`, everything is composed offscreen at 2x, with a
+// translucent stand-in for the material.
 
 let renderScale: CGFloat = 2
 
@@ -1913,7 +2065,7 @@ func barIcon(badge: Int, darkBar: Bool) -> NSImage {
 }
 
 @MainActor
-func renderArtboards(to dir: String) {
+func renderArtboards(to dir: String, offscreen: Bool) {
     let now = Date()
     let soon = now.addingTimeInterval(51 * 60)
     let later = now.addingTimeInterval(3 * 24 * 3600)
@@ -1981,20 +2133,38 @@ func renderArtboards(to dir: String) {
                            note: "Rate limited · updated 3m ago", stale: true, asOf: now.addingTimeInterval(-180))
     let codexQuiet = Ring(agent: .codex, windows: [w("x0", "Current session", 52, soon)], note: nil)
 
+    // The README shows the defaults, whatever this machine's preferences say.
+    func sample(_ rings: [Ring]) -> Model {
+        let m = model(rings)
+        m.useGlass = Model.glassAvailable
+        m.useExtension = false
+        return m
+    }
+
     // Two jobs finished since the tray was last opened: red dot + ✓ in the
     // lists, "2" on the icon.
-    let live = model([claudeLive, codexLive])
+    let live = sample([claudeLive, codexLive])
     live.finishedAt["claude:c2"] = now.addingTimeInterval(-240)
     live.finishedAt["codex:s2"] = now.addingTimeInterval(-90)
     live.unread = ["claude:c2", "codex:s2"]
 
-    // ---- pieces
+    // ---- pieces: each panel as its view (for the on-screen scene) and as an
+    // offscreen image (for its size, and for the offscreen composition)
+    struct Piece {
+        let view: AnyView
+        let image: NSImage
+        let pad: CGFloat
+    }
+    func piece<V: View>(_ view: V, pad: CGFloat = 0) -> Piece {
+        Piece(view: AnyView(view), image: renderRep(view, pad: pad), pad: pad)
+    }
     let shadowPad: CGFloat = 28
-    let trayLive = renderRep(TrayView(model: live), pad: shadowPad)
-    let trayStale = renderRep(TrayView(model: model([claudeStale, codexQuiet])), pad: shadowPad)
-    let calloutClaude = renderRep(CalloutView(ring: claudeLive, model: live, settled: true))
-    let calloutCodex = renderRep(CalloutView(ring: codexLive, model: live, settled: true))
-    let calloutDesktop = renderRep(CalloutView(ring: claudeViaDesktop, model: model([claudeViaDesktop]), settled: true))
+    offscreenRender = true
+    let trayLive = piece(TrayView(model: live), pad: shadowPad)
+    let trayStale = piece(TrayView(model: sample([claudeStale, codexQuiet])), pad: shadowPad)
+    let calloutClaude = piece(CalloutView(ring: claudeLive, model: live, settled: true))
+    let calloutCodex = piece(CalloutView(ring: codexLive, model: live, settled: true))
+    let calloutDesktop = piece(CalloutView(ring: claudeViaDesktop, model: sample([claudeViaDesktop]), settled: true))
 
     // ---- layout (points; y measured from the top of a panel)
     let panelW: CGFloat = 440, gap: CGFloat = 24, barH: CGFloat = 30, margin: CGFloat = 26
@@ -2002,133 +2172,188 @@ func renderArtboards(to dir: String) {
     let calloutTop = barH + Layout.trayHeight - 4 // the bubble's pointer tucks 4 pt under the tray
     let calloutX: CGFloat = 26 // scene sits left; the bar's system items take the right
     let caption: CGFloat = 22, iconRow: CGFloat = 38
-    let leftH = calloutTop + calloutClaude.size.height + 18 + caption + iconRow + margin
-    let rightH = calloutTop + calloutCodex.size.height + 18
-        + caption + calloutDesktop.size.height + 14
+    let leftH = calloutTop + calloutClaude.image.size.height + 18 + caption + iconRow + margin
+    let rightH = calloutTop + calloutCodex.image.size.height + 18
+        + caption + calloutDesktop.image.size.height + 14
         + caption + (Layout.trayHeight * 0.8) + margin
     let H = max(leftH, rightH).rounded(.up)
     let W = panelW * 2 + gap
+    let sceneFrames = [NSRect(x: 0, y: 0, width: panelW, height: H),
+                       NSRect(x: panelW + gap, y: 0, width: panelW, height: H)]
+    let sceneRadius: CGFloat = 18
 
-    guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(W * renderScale),
-                                     pixelsHigh: Int(H * renderScale), bitsPerSample: 8, samplesPerPixel: 4,
-                                     hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB,
-                                     bytesPerRow: 0, bitsPerPixel: 0) else {
-        FileHandle.standardError.write("render failed: no bitmap\n".data(using: .utf8)!)
-        exit(1)
-    }
-    // Point size first: the context derives its points-to-pixels scale from it.
-    rep.size = NSSize(width: W, height: H)
-    guard let gctx = NSGraphicsContext(bitmapImageRep: rep) else {
-        FileHandle.standardError.write("render failed: no bitmap context\n".data(using: .utf8)!)
-        exit(1)
-    }
-    NSGraphicsContext.saveGraphicsState()
-    NSGraphicsContext.current = gctx
-    gctx.imageInterpolation = .high
+    // ---- composition. With `drawPanels` the pieces' offscreen images go in;
+    // without, `placed` notes where the real views belong and the wallpaper runs
+    // `bleed` points past the artboard, so glass near an edge has it to sample.
+    var placed: [PreviewPanel] = []
 
-    /// Draw with the origin at a panel's top-left, y growing downward.
-    func place(_ img: NSImage, panelX: CGFloat, x: CGFloat, top: CGFloat, scale s: CGFloat = 1) {
-        let size = NSSize(width: img.size.width * s, height: img.size.height * s)
-        img.draw(in: NSRect(x: panelX + x, y: H - top - size.height, width: size.width, height: size.height))
-    }
-    func text(_ str: String, panelX: CGFloat, x: CGFloat, top: CGFloat, size: CGFloat = 12,
-              weight: NSFont.Weight = .medium, alpha: CGFloat = 0.92) {
-        let shadow = NSShadow()
-        shadow.shadowColor = NSColor.black.withAlphaComponent(0.35)
-        shadow.shadowBlurRadius = 3
-        shadow.shadowOffset = NSSize(width: 0, height: -1)
-        let attrs: [NSAttributedString.Key: Any] = [
-            .foregroundColor: NSColor.white.withAlphaComponent(alpha),
-            .font: NSFont.systemFont(ofSize: size, weight: weight), .shadow: shadow,
-        ]
-        let h = (str as NSString).size(withAttributes: attrs).height
-        (str as NSString).draw(at: NSPoint(x: panelX + x, y: H - top - h), withAttributes: attrs)
-    }
-    func symbol(_ names: [String], pointSize: CGFloat = 13) -> NSImage? {
-        for n in names {
-            if let img = NSImage(systemSymbolName: n, accessibilityDescription: nil)?
-                .withSymbolConfiguration(.init(pointSize: pointSize, weight: .medium)) { return tint(img, .white) }
-        }
-        return nil
-    }
-
-    /// One "screenshot": wallpaper, a translucent menu bar with the cat in it,
-    /// and the tray hanging centered under the (highlighted) status item.
-    func scene(panelX: CGFloat, iconCenterX: CGFloat, badge: Int, tray: NSImage) {
-        let frame = NSRect(x: panelX, y: 0, width: panelW, height: H)
+    func compose(bleed: CGFloat, drawPanels: Bool) -> NSBitmapImageRep? {
+        placed = []
+        let cw = W + 2 * bleed, ch = H + 2 * bleed
+        guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(cw * renderScale),
+                                         pixelsHigh: Int(ch * renderScale), bitsPerSample: 8, samplesPerPixel: 4,
+                                         hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB,
+                                         bytesPerRow: 0, bitsPerPixel: 0) else { return nil }
+        // Point size first: the context derives its points-to-pixels scale from it.
+        rep.size = NSSize(width: cw, height: ch)
+        guard let gctx = NSGraphicsContext(bitmapImageRep: rep) else { return nil }
         NSGraphicsContext.saveGraphicsState()
-        NSBezierPath(roundedRect: frame, xRadius: 18, yRadius: 18).addClip()
-        // Wallpaper: a vertical three-stop gradient painted as exact one-pixel
-        // bands. NSGradient dithers, and that noise makes the PNG several times
-        // larger; flat rows look the same and compress to almost nothing.
-        let stops: [(CGFloat, CGFloat, CGFloat)] = [(0.17, 0.14, 0.45), (0.52, 0.23, 0.56), (0.95, 0.56, 0.36)]
-        let rows = Int(H * renderScale)
-        gctx.shouldAntialias = false
-        for i in 0..<rows {
-            let t = CGFloat(i) / CGFloat(max(rows - 1, 1)) * CGFloat(stops.count - 1)
-            let k = min(Int(t), stops.count - 2), f = t - CGFloat(k)
-            let (a, b) = (stops[k], stops[k + 1])
-            NSColor(calibratedRed: a.0 + (b.0 - a.0) * f, green: a.1 + (b.1 - a.1) * f,
-                    blue: a.2 + (b.2 - a.2) * f, alpha: 1).setFill()
-            NSRect(x: frame.minX, y: H - CGFloat(i + 1) / renderScale,
-                   width: frame.width, height: 1 / renderScale).fill()
+        defer { NSGraphicsContext.restoreGraphicsState() }
+        NSGraphicsContext.current = gctx
+        gctx.imageInterpolation = .high
+        // Everything below is in artboard coordinates.
+        let shift = NSAffineTransform()
+        shift.translateX(by: bleed, yBy: bleed)
+        shift.concat()
+
+        /// Draw with the origin at a panel's top-left, y growing downward.
+        func place(_ img: NSImage, panelX: CGFloat, x: CGFloat, top: CGFloat, scale s: CGFloat = 1) {
+            let size = NSSize(width: img.size.width * s, height: img.size.height * s)
+            img.draw(in: NSRect(x: panelX + x, y: H - top - size.height, width: size.width, height: size.height))
         }
-        gctx.shouldAntialias = true
-        // menu bar
-        NSColor.black.withAlphaComponent(0.26).setFill()
-        NSRect(x: panelX, y: H - barH, width: panelW, height: barH).fill()
-        text("Mon 9:41 AM", panelX: panelX, x: panelW - 96, top: 7, size: 13, weight: .medium, alpha: 0.96)
-        var x = panelW - 96 - 14
-        let itemLimit = iconCenterX + 15 + 12 // keep clear of the status item's slot
-        for names in [["switch.2"], ["magnifyingglass"], ["wifi"]] {
-            guard let img = symbol(names), x - img.size.width >= itemLimit else { continue }
-            x -= img.size.width
-            place(img, panelX: panelX, x: x, top: (barH - img.size.height) / 2)
-            x -= 16
+        func panel(_ p: Piece, panelX: CGFloat, x: CGFloat, top: CGFloat, scale s: CGFloat = 1) {
+            if drawPanels {
+                place(p.image, panelX: panelX, x: x - p.pad * s, top: top - p.pad * s, scale: s)
+            } else {
+                placed.append(PreviewPanel(view: p.view, x: panelX + x, top: top, scale: s))
+            }
         }
-        // status item: highlighted while its tray is open
-        NSColor.white.withAlphaComponent(0.24).setFill()
-        NSBezierPath(roundedRect: NSRect(x: panelX + iconCenterX - 15, y: H - barH + 4, width: 30, height: barH - 8),
-                     xRadius: 6, yRadius: 6).fill()
-        place(barIcon(badge: badge, darkBar: true), panelX: panelX, x: iconCenterX - 9, top: (barH - 18) / 2)
-        // tray, flush under the bar (the rendered image carries `shadowPad` all round)
-        place(tray, panelX: panelX, x: iconCenterX - trayW / 2 - shadowPad, top: barH - shadowPad)
-        NSGraphicsContext.restoreGraphicsState()
+        func text(_ str: String, panelX: CGFloat, x: CGFloat, top: CGFloat, size: CGFloat = 12,
+                  weight: NSFont.Weight = .medium, alpha: CGFloat = 0.92) {
+            let shadow = NSShadow()
+            shadow.shadowColor = NSColor.black.withAlphaComponent(0.35)
+            shadow.shadowBlurRadius = 3
+            shadow.shadowOffset = NSSize(width: 0, height: -1)
+            let attrs: [NSAttributedString.Key: Any] = [
+                .foregroundColor: NSColor.white.withAlphaComponent(alpha),
+                .font: NSFont.systemFont(ofSize: size, weight: weight), .shadow: shadow,
+            ]
+            let h = (str as NSString).size(withAttributes: attrs).height
+            (str as NSString).draw(at: NSPoint(x: panelX + x, y: H - top - h), withAttributes: attrs)
+        }
+        func symbol(_ names: [String], pointSize: CGFloat = 13) -> NSImage? {
+            for n in names {
+                if let img = NSImage(systemSymbolName: n, accessibilityDescription: nil)?
+                    .withSymbolConfiguration(.init(pointSize: pointSize, weight: .medium)) { return tint(img, .white) }
+            }
+            return nil
+        }
+        /// Wallpaper: a vertical three-stop gradient painted as exact one-pixel
+        /// bands. NSGradient dithers, and that noise makes the PNG several times
+        /// larger; flat rows look the same and compress to almost nothing. Rows
+        /// past the artboard (the bleed) repeat its first and last.
+        func wallpaper(x: CGFloat, width: CGFloat, extraRows: Int = 0) {
+            let stops: [(CGFloat, CGFloat, CGFloat)] = [(0.17, 0.14, 0.45), (0.52, 0.23, 0.56), (0.95, 0.56, 0.36)]
+            let rows = Int(H * renderScale)
+            gctx.shouldAntialias = false
+            for i in -extraRows..<(rows + extraRows) {
+                let t = CGFloat(min(max(i, 0), rows - 1)) / CGFloat(max(rows - 1, 1)) * CGFloat(stops.count - 1)
+                let k = min(Int(t), stops.count - 2), f = t - CGFloat(k)
+                let (a, b) = (stops[k], stops[k + 1])
+                NSColor(calibratedRed: a.0 + (b.0 - a.0) * f, green: a.1 + (b.1 - a.1) * f,
+                        blue: a.2 + (b.2 - a.2) * f, alpha: 1).setFill()
+                NSRect(x: x, y: H - CGFloat(i + 1) / renderScale, width: width, height: 1 / renderScale).fill()
+            }
+            gctx.shouldAntialias = true
+        }
+
+        /// One "screenshot": wallpaper, a translucent menu bar with the cat in it,
+        /// and the tray hanging centered under the (highlighted) status item.
+        func scene(_ frame: NSRect, iconCenterX: CGFloat, badge: Int, tray: Piece) {
+            let panelX = frame.minX
+            NSGraphicsContext.saveGraphicsState()
+            NSBezierPath(roundedRect: frame, xRadius: sceneRadius, yRadius: sceneRadius).addClip()
+            wallpaper(x: frame.minX, width: frame.width)
+            // Discs on it: hard edges for the glass to blur, where a real desktop
+            // would have windows. Flat fills, so they cost the PNG next to nothing.
+            let discs: [(CGFloat, CGFloat, CGFloat, NSColor)] = [
+                (338, 168, 128, NSColor(calibratedWhite: 1, alpha: 0.13)),
+                (44, 452, 176, NSColor(calibratedRed: 1.0, green: 0.42, blue: 0.66, alpha: 0.20)),
+                (414, 742, 150, NSColor(calibratedRed: 1.0, green: 0.74, blue: 0.30, alpha: 0.22)),
+                (150, 930, 118, NSColor(calibratedRed: 0.30, green: 0.18, blue: 0.78, alpha: 0.22)),
+            ]
+            for (cx, top, r, color) in discs {
+                color.setFill()
+                NSBezierPath(ovalIn: NSRect(x: panelX + cx - r, y: H - top - r, width: 2 * r, height: 2 * r)).fill()
+            }
+            // menu bar
+            NSColor.black.withAlphaComponent(0.26).setFill()
+            NSRect(x: panelX, y: H - barH, width: panelW, height: barH).fill()
+            text("Mon 9:41 AM", panelX: panelX, x: panelW - 96, top: 7, size: 13, weight: .medium, alpha: 0.96)
+            var x = panelW - 96 - 14
+            let itemLimit = iconCenterX + 15 + 12 // keep clear of the status item's slot
+            for names in [["switch.2"], ["magnifyingglass"], ["wifi"]] {
+                guard let img = symbol(names), x - img.size.width >= itemLimit else { continue }
+                x -= img.size.width
+                place(img, panelX: panelX, x: x, top: (barH - img.size.height) / 2)
+                x -= 16
+            }
+            // status item: highlighted while its tray is open
+            NSColor.white.withAlphaComponent(0.24).setFill()
+            NSBezierPath(roundedRect: NSRect(x: panelX + iconCenterX - 15, y: H - barH + 4, width: 30, height: barH - 8),
+                         xRadius: 6, yRadius: 6).fill()
+            place(barIcon(badge: badge, darkBar: true), panelX: panelX, x: iconCenterX - 9, top: (barH - 18) / 2)
+            // tray, flush under the bar
+            panel(tray, panelX: panelX, x: iconCenterX - trayW / 2, top: barH)
+            NSGraphicsContext.restoreGraphicsState()
+        }
+
+        if bleed > 0 { wallpaper(x: -bleed, width: cw, extraRows: Int(bleed * renderScale)) }
+
+        // Left: hovering the Claude ring. The bubble is centered in the panel, so the
+        // tray sits where ring 0 lands above its pointer.
+        let leftX = sceneFrames[0].minX
+        let leftIcon = calloutX + Layout.calloutWidth / 2 - Layout.ringCenterX(0) + trayW / 2
+        scene(sceneFrames[0], iconCenterX: leftIcon, badge: 2, tray: trayLive)
+        panel(calloutClaude, panelX: leftX, x: calloutX, top: calloutTop)
+        var ly = calloutTop + calloutClaude.image.size.height + 18
+        text("Menu-bar icon: light bar · dark bar · unread finished jobs", panelX: leftX, x: calloutX, top: ly)
+        ly += caption
+        for (i, (badge, dark)) in [(0, false), (0, true), (3, true)].enumerated() {
+            let cell = NSRect(x: leftX + calloutX + CGFloat(i) * 74, y: H - ly - iconRow, width: 64, height: iconRow)
+            (dark ? NSColor(calibratedWhite: 0.13, alpha: 0.92) : NSColor(calibratedWhite: 0.96, alpha: 0.96)).setFill()
+            NSBezierPath(roundedRect: cell, xRadius: 9, yRadius: 9).fill()
+            barIcon(badge: badge, darkBar: dark).draw(in: NSRect(x: cell.midX - 13, y: cell.midY - 13, width: 26, height: 26))
+        }
+
+        // Right: hovering the Codex ring, then the states a screenshot rarely catches.
+        let rightX = sceneFrames[1].minX
+        let rightIcon = calloutX + Layout.calloutWidth / 2 - Layout.ringCenterX(1) + trayW / 2
+        scene(sceneFrames[1], iconCenterX: rightIcon, badge: 2, tray: trayLive)
+        panel(calloutCodex, panelX: rightX, x: calloutX, top: calloutTop)
+        var y = calloutTop + calloutCodex.image.size.height + 18
+        text("Claude Code sign-in expired: the desktop app's numbers", panelX: rightX, x: calloutX, top: y)
+        y += caption
+        panel(calloutDesktop, panelX: rightX, x: calloutX, top: y)
+        y += calloutDesktop.image.size.height + 14
+        text("Rate limited: last value kept, dimmed", panelX: rightX, x: calloutX, top: y)
+        y += caption
+        panel(trayStale, panelX: rightX, x: calloutX, top: y, scale: 0.8)
+        return rep
     }
 
-    // Left: hovering the Claude ring. The bubble is centered in the panel, so the
-    // tray sits where ring 0 lands above its pointer.
-    let leftX: CGFloat = 0
-    let leftIcon = calloutX + Layout.calloutWidth / 2 - Layout.ringCenterX(0) + trayW / 2
-    scene(panelX: leftX, iconCenterX: leftIcon, badge: 2, tray: trayLive)
-    place(calloutClaude, panelX: leftX, x: calloutX, top: calloutTop)
-    var ly = calloutTop + calloutClaude.size.height + 18
-    text("Menu-bar icon: light bar · dark bar · unread finished jobs", panelX: leftX, x: calloutX, top: ly)
-    ly += caption
-    for (i, (badge, dark)) in [(0, false), (0, true), (3, true)].enumerated() {
-        let cell = NSRect(x: leftX + calloutX + CGFloat(i) * 74, y: H - ly - iconRow, width: 64, height: iconRow)
-        (dark ? NSColor(calibratedWhite: 0.13, alpha: 0.92) : NSColor(calibratedWhite: 0.96, alpha: 0.96)).setFill()
-        NSBezierPath(roundedRect: cell, xRadius: 9, yRadius: 9).fill()
-        barIcon(badge: badge, darkBar: dark).draw(in: NSRect(x: cell.midX - 13, y: cell.midY - 13, width: 26, height: 26))
+    // ---- the image: the real material when there is one, else the stand-in
+    var png: Data?
+    var how = "offscreen"
+    let bleed: CGFloat = 32
+    if !offscreen, live.useGlass, let base = compose(bleed: bleed, drawPanels: false) {
+        offscreenRender = false
+        let backdrop = NSImage(size: base.size)
+        backdrop.addRepresentation(base)
+        if let shot = capturePreview(backdrop: backdrop, panels: placed, bleed: bleed) {
+            png = previewPNG(from: shot, size: NSSize(width: W, height: H), bleed: bleed,
+                             scenes: sceneFrames, radius: sceneRadius)
+            how = "captured on screen @\(shot.width / Int(base.size.width))x"
+        } else {
+            FileHandle.standardError.write("could not capture the window; using the offscreen stand-in\n".data(using: .utf8)!)
+        }
+        offscreenRender = true
     }
-
-    // Right: hovering the Codex ring, then the states a screenshot rarely catches.
-    let rightX = panelW + gap
-    let rightIcon = calloutX + Layout.calloutWidth / 2 - Layout.ringCenterX(1) + trayW / 2
-    scene(panelX: rightX, iconCenterX: rightIcon, badge: 2, tray: trayLive)
-    place(calloutCodex, panelX: rightX, x: calloutX, top: calloutTop)
-    var y = calloutTop + calloutCodex.size.height + 18
-    text("Claude Code sign-in expired: the desktop app's numbers", panelX: rightX, x: calloutX, top: y)
-    y += caption
-    place(calloutDesktop, panelX: rightX, x: calloutX, top: y)
-    y += calloutDesktop.size.height + 14
-    text("Rate limited: last value kept, dimmed", panelX: rightX, x: calloutX, top: y)
-    y += caption
-    place(trayStale, panelX: rightX, x: calloutX - shadowPad * 0.8, top: y - shadowPad * 0.8, scale: 0.8)
-
-    NSGraphicsContext.restoreGraphicsState()
-    guard let png = rep.representation(using: .png, properties: [:]) else {
-        FileHandle.standardError.write("render failed: no png\n".data(using: .utf8)!)
+    if png == nil {
+        png = compose(bleed: 0, drawPanels: true)?.representation(using: .png, properties: [:])
+    }
+    guard let png else {
+        FileHandle.standardError.write("render failed: no image\n".data(using: .utf8)!)
         exit(1)
     }
     // `--render docs/preview.png` writes that file; a directory gets the default name.
@@ -2140,14 +2365,199 @@ func renderArtboards(to dir: String) {
         FileHandle.standardError.write("render failed: \(error.localizedDescription)\n".data(using: .utf8)!)
         exit(1)
     }
-    print("\(path)  \(Int(W))x\(Int(H)) pt @\(Int(renderScale))x")
+    print("\(path)  \(Int(W))x\(Int(H)) pt, \(how)")
+}
+
+/// A real panel view and where it goes on the artboard (points, from the top-left).
+struct PreviewPanel {
+    let view: AnyView
+    let x: CGFloat
+    let top: CGFloat
+    let scale: CGFloat
+}
+
+/// The preview as the window server draws it: the backdrop in an opaque window
+/// with the real panels over it, so their material has something to work on.
+/// Only that window is captured, so nothing else on screen can end up in the
+/// image. It goes on the sharpest display. nil when the capture isn't possible.
+@MainActor
+func capturePreview(backdrop: NSImage, panels: [PreviewPanel], bleed: CGFloat) -> CGImage? {
+    guard let screen = NSScreen.screens.max(by: { $0.backingScaleFactor < $1.backingScaleFactor }) else { return nil }
+    let size = backdrop.size
+    let scene = ZStack(alignment: .topLeading) {
+        Image(nsImage: backdrop).interpolation(.none)
+        ForEach(panels.indices, id: \.self) { i in
+            panels[i].view
+                .fixedSize()
+                .scaleEffect(panels[i].scale, anchor: .topLeading)
+                .offset(x: bleed + panels[i].x, y: bleed + panels[i].top)
+        }
+    }
+    .frame(width: size.width, height: size.height, alignment: .topLeading)
+    .ignoresSafeArea()
+
+    let frame = NSRect(x: screen.visibleFrame.minX, y: screen.visibleFrame.maxY - size.height,
+                       width: size.width, height: size.height)
+    let window = NSWindow(contentRect: frame, styleMask: [.borderless], backing: .buffered, defer: false)
+    window.level = .statusBar
+    window.hasShadow = false
+    let host = NSHostingView(rootView: scene)
+    host.sizingOptions = [] // the window sets the size, not the content
+    window.contentView = host
+    window.setFrame(frame, display: true)
+    window.orderFrontRegardless()
+    RunLoop.main.run(until: Date().addingTimeInterval(1.5)) // let the material settle
+    let shot = captureOnScreen(window, rect: window.frame, below: false)
+    window.orderOut(nil)
+    return shot
+}
+
+/// The artboard cut out of a capture that carries `bleed` all round: sRGB, and
+/// transparent outside the rounded scenes.
+func previewPNG(from shot: CGImage, size: NSSize, bleed: CGFloat, scenes: [NSRect], radius: CGFloat) -> Data? {
+    let scale = CGFloat(shot.width) / (size.width + 2 * bleed)
+    let crop = CGRect(x: bleed * scale, y: bleed * scale, width: size.width * scale, height: size.height * scale)
+    guard let art = shot.cropping(to: crop.integral),
+          let srgb = CGColorSpace(name: CGColorSpace.sRGB),
+          let ctx = CGContext(data: nil, width: art.width, height: art.height, bitsPerComponent: 8, bytesPerRow: 0,
+                              space: srgb, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+    ctx.scaleBy(x: scale, y: scale)
+    for scene in scenes {
+        ctx.addPath(CGPath(roundedRect: scene, cornerWidth: radius, cornerHeight: radius, transform: nil))
+    }
+    ctx.clip()
+    ctx.interpolationQuality = .none
+    ctx.draw(art, in: CGRect(origin: .zero, size: size))
+    guard let out = ctx.makeImage() else { return nil }
+    return NSBitmapImageRep(cgImage: out).representation(using: .png, properties: [:])
+}
+
+// MARK: - Material self-check (`TokenVision --probe-glass [outDir]`)
+//
+// A backdrop material is composited by the window server, so no offscreen
+// render can show it. This puts the real tray and callout views in a real
+// overlay panel for a second and reports whether SwiftUI built backdrop layers
+// for them — i.e. whether Liquid Glass is live on this machine, or fell back.
+// With `outDir` it also saves what the window server actually drew
+// (`tray.png`, `callout.png`), over a sample backdrop of our own.
+
+func layerClasses(_ layer: CALayer, into counts: inout [String: Int]) {
+    counts[String(describing: type(of: layer)), default: 0] += 1
+    for sub in layer.sublayers ?? [] { layerClasses(sub, into: &counts) }
+}
+
+/// Pixels of `window` (and, with `below`, of whatever is on screen under it)
+/// within `rect`, as the window server composites them. A process may always capture its own windows
+/// (no Screen Recording permission; other apps' windows just come out missing).
+/// `CGWindowListCreateImage` left the SDK headers in macOS 15 but is still
+/// exported, hence the lookup by name; nil if that ever stops being true.
+func captureOnScreen(_ window: NSWindow, rect: NSRect, below: Bool = true) -> CGImage? {
+    typealias CreateImage = @convention(c) (CGRect, UInt32, UInt32, UInt32) -> Unmanaged<CGImage>?
+    guard let cg = dlopen("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics", RTLD_NOW),
+          let sym = dlsym(cg, "CGWindowListCreateImage"),
+          let screen = NSScreen.screens.first else { return nil }
+    let create = unsafeBitCast(sym, to: CreateImage.self)
+    let flipped = CGRect(x: rect.minX, y: screen.frame.maxY - rect.maxY, width: rect.width, height: rect.height)
+    let onScreenBelowWindow: UInt32 = 1 << 2, includingWindow: UInt32 = 1 << 3, bestResolution: UInt32 = 1 << 3
+    return create(flipped, below ? onScreenBelowWindow | includingWindow : includingWindow,
+                  UInt32(window.windowNumber), bestResolution)?
+        .takeRetainedValue()
+}
+
+/// Something for the material to work on: a wallpaper-like gradient with hard
+/// detail, so blur and refraction are easy to judge.
+struct ProbeBackdrop: View {
+    var body: some View {
+        ZStack {
+            LinearGradient(colors: [Color(red: 0.17, green: 0.14, blue: 0.45), Color(red: 0.52, green: 0.23, blue: 0.56),
+                                    Color(red: 0.95, green: 0.56, blue: 0.36)], startPoint: .top, endPoint: .bottom)
+            VStack(spacing: 7) {
+                ForEach(0..<40, id: \.self) { _ in
+                    Text("Sphinx of black quartz, judge my vow · Sphinx of black quartz, judge my vow")
+                        .font(.system(size: 12, weight: .semibold)).foregroundStyle(.white).fixedSize()
+                }
+            }
+        }
+        .clipped()
+    }
+}
+
+@MainActor
+func probeGlass(saveTo dir: String?) -> Bool {
+    let soon = Date().addingTimeInterval(3000)
+    let ring = Ring(agent: .claude,
+                    windows: [LimitWindow(id: "p0", label: "Current session", usedPercent: 42, resetsAt: soon)],
+                    note: nil)
+    let codex = Ring(agent: .codex,
+                     windows: [LimitWindow(id: "p1", label: "Current session", usedPercent: 86, resetsAt: soon)],
+                     note: nil)
+    let m = model([ring, codex])
+    var allLive = true
+    for (name, view) in [("tray", AnyView(TrayPanelView(model: m))),
+                         ("callout", AnyView(CalloutView(ring: ring, model: m, settled: true)))] {
+        let panel = OverlayPanel()
+        let host = NSHostingView(rootView: view)
+        let size = name == "tray"
+            ? NSSize(width: Layout.trayWidth(columns: 2) + 2 * Layout.shadowPad, height: Layout.trayHeight + Layout.shadowPad)
+            : host.fittingSize
+        let screen = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1200, height: 800)
+        let frame = NSRect(x: screen.maxX - size.width - 60, y: screen.maxY - size.height - 40,
+                           width: size.width, height: size.height)
+        // The backdrop goes up only when saving: it hides the screen behind it,
+        // so the saved images never contain anything but sample content.
+        var backdrop: NSWindow?
+        if dir != nil {
+            let w = NSWindow(contentRect: frame.insetBy(dx: -24, dy: -24), styleMask: [.borderless],
+                             backing: .buffered, defer: false)
+            w.level = .statusBar
+            let fill = NSHostingView(rootView: ProbeBackdrop())
+            fill.sizingOptions = [] // fill the window; don't grow it to the text
+            w.contentView = fill
+            w.orderFrontRegardless()
+            backdrop = w
+        }
+        panel.setFrame(frame, display: true)
+        panel.contentView = host
+        panel.orderFrontRegardless()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.8))
+        var counts: [String: Int] = [:]
+        if let layer = host.layer { layerClasses(layer, into: &counts) }
+        if let dir, let backdrop {
+            let path = (dir as NSString).appendingPathComponent("\(name).png")
+            if let cg = captureOnScreen(panel, rect: backdrop.frame),
+               let png = NSBitmapImageRep(cgImage: cg).representation(using: .png, properties: [:]),
+               (try? png.write(to: URL(fileURLWithPath: path))) != nil {
+                print("\(name): saved \(path)")
+            } else {
+                print("\(name): could not capture the window")
+            }
+        }
+        panel.orderOut(nil)
+        backdrop?.orderOut(nil)
+        let backdrops = counts.filter { $0.key.contains("Backdrop") }.values.reduce(0, +)
+        let sdf = counts.filter { $0.key.contains("SDF") }.values.reduce(0, +)
+        let live = sdf > 0 // the extension effect has a backdrop of its own; only glass has SDF layers
+        allLive = allLive && live
+        print("\(name): \(live ? "Liquid Glass live" : "no backdrop (solid / fallback)") — backdrop layers \(backdrops), SDF layers \(sdf)")
+    }
+    return allLive
+}
+
+if let idx = CommandLine.arguments.firstIndex(of: "--probe-glass") {
+    let app = NSApplication.shared
+    app.setActivationPolicy(.accessory)
+    print("glass available: \(Model.glassAvailable)")
+    let dir = CommandLine.arguments[safe: idx + 1]
+    let ok = MainActor.assumeIsolated { probeGlass(saveTo: dir) }
+    exit(ok ? 0 : 1)
 }
 
 if let idx = CommandLine.arguments.firstIndex(of: "--render") {
     let dir = CommandLine.arguments[safe: idx + 1] ?? NSTemporaryDirectory()
     let app = NSApplication.shared
     app.setActivationPolicy(.accessory)
-    MainActor.assumeIsolated { renderArtboards(to: dir) }
+    let offscreen = CommandLine.arguments.contains("--offscreen")
+    MainActor.assumeIsolated { renderArtboards(to: dir, offscreen: offscreen) }
     exit(0)
 }
 

@@ -41,7 +41,9 @@ node src/read-usage.js --json             # Codex account usage (account/usage/r
 node src/read-claude-usage.js --json      # Claude usage aggregated from transcripts
 
 sh widget/build.sh && ./widget/TokenVision &   # menu-bar widget; right-click to quit
-./widget/TokenVision --render docs/preview.png # re-render the image above, offscreen (sample data)
+./widget/TokenVision --render docs/preview.png # re-render the image above (sample data; real glass, captured
+                                               #    from a window of its own; --offscreen for a stand-in)
+./widget/TokenVision --probe-glass [dir]       # is Liquid Glass live here? with dir: save what the window server drew
 
 sh widget/install-launch-agent.sh              # …or start it at login (per-user LaunchAgent,
 sh widget/install-launch-agent.sh --remove     #    relaunched after a crash, not after Quit)
@@ -70,6 +72,14 @@ sh widget/install-launch-agent.sh --remove     #    relaunched after a crash, no
 - **Codex thread titles** are read from `~/.codex/state_5.sqlite` (table
   `threads`, opened read-only through `node:sqlite`) every 30 s; without them a
   thread is labelled by its folder.
+- **Panels** are Liquid Glass on macOS 26 and later: SwiftUI's `glassEffect` in
+  the tray's and the callout's own outlines, dark variant with a light tint so
+  the white text holds up over a bright wallpaper. Right-click the menu-bar icon
+  to switch to solid black (remembered); older systems always get solid black.
+  The same menu has **Background Extension**, Apple's `backgroundExtensionEffect()`
+  on the tray's rings: mirrored, blurred copies carry the ring colors out to the
+  rim. It is off by default, because the effect is built for opaque content that
+  fills a window and on a floating panel its blur also softens the tray's outline.
 - **Finished-job notifications** are computed by the widget: a session that was
   running in one snapshot and idle in the next fires `display notification`
   (via `osascript`, which works from an unbundled binary), bumps the unread

@@ -38,6 +38,9 @@ node src/read-usage.js --json             # Codex account usage (account/usage/r
 node src/read-claude-usage.js --json      # Claude usage aggregated from transcripts
 
 sh widget/build.sh && ./widget/TokenVision &   # menu-bar widget; right-click to quit
+
+sh widget/install-launch-agent.sh              # …or start it at login (per-user LaunchAgent,
+sh widget/install-launch-agent.sh --remove     #    relaunched after a crash, not after Quit)
 ```
 
 ## How it works

@@ -1,6 +1,6 @@
 // Token Vision — a macOS menu-bar widget showing plan-limit usage.
 //
-// A status-bar button (Claude starburst) toggles a black tray that unfurls
+// A status-bar button (a cat) toggles a black tray that unfurls
 // downward from the menu bar, centered under the button, with one ring gauge
 // per agent: Claude and Codex. The ring shows the most-used limit window;
 // hovering a ring opens a callout listing every window (session / weekly) with
@@ -1355,25 +1355,54 @@ enum SessionOpener {
 
 // MARK: - Status-bar icon
 
-/// Claude starburst for the status item. With `badge` > 0 a red counter sits
-/// on the top-right corner (unread finished jobs). A badged icon can't be a
-/// template image (the badge must stay red), so the mark is drawn in the label
-/// color — this block re-runs per appearance, so it still follows the menu bar.
+/// The menu-bar mark: a cat. Lucide's "cat" icon (ISC License, © Lucide Icons
+/// and Contributors), embedded as SVG and rendered by AppKit's native vector
+/// SVG support, so it stays crisp at any scale. Drawn in black: as a template
+/// image only its alpha matters, and the badged variant recolors it.
+let statusMark: NSImage? = {
+    let svg = """
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5c.67 0 1.35.09 2 .26 1.78-2 5.03-2.84 6.42-2.26 1.4.58-.42 7-.42 7 .57 1.07 1 2.24 1 3.44C21 17.9 16.97 21 12 21s-9-3-9-7.56c0-1.25.5-2.4 1-3.44 0 0-1.89-6.42-.5-7 1.39-.58 4.72.23 6.5 2.23A9.04 9.04 0 0 1 12 5Z"/><path d="M8 14v.5"/><path d="M16 14v.5"/><path d="M11.25 16.25h1.5L12 17l-.75-.75Z"/></svg>
+    """
+    guard let img = NSImage(data: Data(svg.utf8)), !img.representations.isEmpty else { return nil }
+    return img
+}()
+
+/// Fallback mark (the Claude starburst) for a macOS whose NSImage can't decode
+/// SVG — an empty image would leave an invisible, unclickable status item.
+func strokeStarburst(in size: CGFloat, color: NSColor) {
+    let c = CGPoint(x: size / 2, y: size / 2)
+    let path = NSBezierPath()
+    path.lineWidth = 1.8
+    path.lineCapStyle = .round
+    for i in 0..<12 {
+        let a = CGFloat(i) * .pi / 6
+        let len = (i % 2 == 0 ? 0.48 : 0.4) * size
+        path.move(to: CGPoint(x: c.x + cos(a) * 1.5, y: c.y + sin(a) * 1.5))
+        path.line(to: CGPoint(x: c.x + cos(a) * len, y: c.y + sin(a) * len))
+    }
+    color.setStroke()
+    path.stroke()
+}
+
+/// Status-item image. With `badge` > 0 a red counter sits on the top-right
+/// corner (unread finished jobs). A badged icon can't be a template image (the
+/// badge must stay red), so the mark is recolored to the label color — this
+/// block re-runs per appearance, so it still follows the menu bar.
 func statusIcon(badge: Int = 0) -> NSImage {
     let size: CGFloat = 18
-    let image = NSImage(size: NSSize(width: size, height: size), flipped: false) { _ in
-        let c = CGPoint(x: size / 2, y: size / 2)
-        let path = NSBezierPath()
-        path.lineWidth = 1.8
-        path.lineCapStyle = .round
-        for i in 0..<12 {
-            let a = CGFloat(i) * .pi / 6
-            let len = (i % 2 == 0 ? 0.48 : 0.4) * size
-            path.move(to: CGPoint(x: c.x + cos(a) * 1.5, y: c.y + sin(a) * 1.5))
-            path.line(to: CGPoint(x: c.x + cos(a) * len, y: c.y + sin(a) * len))
+    let image = NSImage(size: NSSize(width: size, height: size), flipped: false) { rect in
+        let ink = badge > 0 ? NSColor.labelColor : NSColor.black
+        if let mark = statusMark {
+            // Lucide keeps its glyph inside the middle ~75% of the 24-unit box;
+            // draw it slightly oversize so it fills the slot like its neighbours.
+            mark.draw(in: rect.insetBy(dx: -1, dy: -1))
+            if badge > 0 {
+                ink.set()
+                rect.fill(using: .sourceAtop) // recolor just the mark's pixels
+            }
+        } else {
+            strokeStarburst(in: size, color: ink)
         }
-        (badge > 0 ? NSColor.labelColor : NSColor.black).setStroke()
-        path.stroke()
         if badge > 0 {
             let text = badge > 99 ? "99+" : String(badge)
             let font = NSFont.systemFont(ofSize: text.count > 2 ? 7 : 9, weight: .bold)
@@ -1381,10 +1410,19 @@ func statusIcon(badge: Int = 0) -> NSImage {
             let ts = (text as NSString).size(withAttributes: attrs)
             let h: CGFloat = 11
             let w = max(h, ts.width + 5)
-            let rect = NSRect(x: size - w, y: size - h, width: w, height: h)
+            let pill = NSRect(x: size - w, y: size - h, width: w, height: h)
+            // Knock a thin gap out of the mark around the badge so the cat's
+            // outline doesn't run into the pill.
+            if let ctx = NSGraphicsContext.current {
+                let halo = pill.insetBy(dx: -1.25, dy: -1.25)
+                ctx.compositingOperation = .destinationOut
+                NSColor.black.setFill()
+                NSBezierPath(roundedRect: halo, xRadius: halo.height / 2, yRadius: halo.height / 2).fill()
+                ctx.compositingOperation = .sourceOver
+            }
             NSColor.systemRed.setFill()
-            NSBezierPath(roundedRect: rect, xRadius: h / 2, yRadius: h / 2).fill()
-            (text as NSString).draw(at: NSPoint(x: rect.midX - ts.width / 2, y: rect.midY - ts.height / 2),
+            NSBezierPath(roundedRect: pill, xRadius: h / 2, yRadius: h / 2).fill()
+            (text as NSString).draw(at: NSPoint(x: pill.midX - ts.width / 2, y: pill.midY - ts.height / 2),
                                     withAttributes: attrs)
         }
         return true

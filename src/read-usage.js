@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 import { parseArgs } from 'node:util';
 import { AppServerClient } from './app-server-client.js';
+import { fmt } from './format.js';
 
 export function formatUsage(usage) {
   const lines = [];
   const s = usage.summary ?? {};
-  const fmt = (n) => (n === null || n === undefined ? '—' : n.toLocaleString('en-US'));
   lines.push('Account token usage');
   lines.push(`  lifetime tokens:     ${fmt(s.lifetimeTokens)}`);
   lines.push(`  peak daily tokens:   ${fmt(s.peakDailyTokens)}`);

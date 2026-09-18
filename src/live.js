@@ -1,6 +1,7 @@
 import { open, readdir, stat } from 'node:fs/promises';
 import { join, sep } from 'node:path';
 import { extractUsageEntry, defaultClaudeDir } from './claude-usage.js';
+import { fmt } from './format.js';
 
 /**
  * Incrementally tails Claude Code transcripts under `<claudeDir>/projects`.
@@ -123,7 +124,7 @@ export function compact(n) {
   return String(n);
 }
 
-export const fmt = (n) => (n === null || n === undefined ? '—' : n.toLocaleString('en-US'));
+export { fmt };
 
 const utcDate = (d) => d.toISOString().slice(0, 10);
 

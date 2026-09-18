@@ -19,7 +19,8 @@ export function defaultClaudeDir() {
   return process.env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude');
 }
 
-const totalTokens = (t) => t.input + t.output + t.cacheCreation + t.cacheRead;
+/** "Tokens" for one API response: input + output + cache creation + cache read. */
+export const totalTokens = (t) => t.input + t.output + t.cacheCreation + t.cacheRead;
 
 /**
  * Parse one transcript JSONL line into a usage entry, or null if the line is

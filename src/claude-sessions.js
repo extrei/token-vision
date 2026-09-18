@@ -1,7 +1,7 @@
 import { readdir, readFile } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
 import { join } from 'node:path';
-import { homedir } from 'node:os';
+import { defaultClaudeDir } from './claude-usage.js';
 
 /**
  * Live Claude Code sessions, read from the registry Claude Code itself keeps
@@ -20,10 +20,6 @@ import { homedir } from 'node:os';
  * and the GUI app (`.app` bundle) that owns that process tree — enough for the
  * widget to bring the right window forward.
  */
-
-export function defaultClaudeDir() {
-  return process.env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude');
-}
 
 export function claudeSessionsDir(claudeDir = defaultClaudeDir()) {
   return join(claudeDir, 'sessions');

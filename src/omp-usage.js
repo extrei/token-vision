@@ -1,7 +1,7 @@
 import { join, basename, dirname, relative, sep } from 'node:path';
 import { readdir, readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { summarize } from './claude-usage.js';
+import { summarize, totalTokens } from './claude-usage.js';
 import { TranscriptTailer, RateWindow } from './live.js';
 
 /**
@@ -26,8 +26,6 @@ export function ompSessionsDir(ompDir = defaultOmpDir()) {
 export function isClaudeModel({ provider, model }) {
   return provider === 'anthropic' || /claude/i.test(model ?? '');
 }
-
-const totalTokens = (t) => t.input + t.output + t.cacheCreation + t.cacheRead;
 
 /** `2026-09-04T14-58-03-451Z_01a06ced-....jsonl` -> `01a06ced-...` */
 export function sessionIdFromFile(file) {

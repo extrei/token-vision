@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 import { parseArgs } from 'node:util';
 import { readClaudeUsage } from './claude-usage.js';
+import { fmt } from './format.js';
 
 export function formatClaudeUsage(usage, { days = 21 } = {}) {
   const lines = [];
   const s = usage.summary ?? {};
-  const fmt = (n) => (n === null || n === undefined ? '—' : n.toLocaleString('en-US'));
   lines.push('Claude Code token usage (local transcripts)');
   lines.push(`  lifetime tokens:     ${fmt(s.lifetimeTokens)}`);
   lines.push(`  peak daily tokens:   ${fmt(s.peakDailyTokens)}`);

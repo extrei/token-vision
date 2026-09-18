@@ -1410,9 +1410,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var calloutRing: Int?
     var calloutHovered = false
     var calloutHide: DispatchWorkItem?
+    /// Streamer supervision: consecutive exits without a good snapshot (drives
+    /// the relaunch backoff), when the current one started, and when it last
+    /// produced a snapshot (the watchdog restarts a silent one).
+    var streamerFailures = 0
+    var streamerStartedAt = Date.distantPast
+    var lastSnapshotAt = Date.distantPast
+    var watchdog: Timer?
 
     static let openDuration: TimeInterval = 0.32
     static let closeDuration: TimeInterval = 0.22
+    static let streamerSilenceLimit: TimeInterval = 90
 
     let scriptPath: String = {
         if CommandLine.arguments.count > 1 { return CommandLine.arguments[1] }
@@ -1469,6 +1477,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main
         ) { [weak self] _ in self?.positionTray() }
         launchStreamer()
+        startWatchdog()
     }
 
     var columns: Int { max(model.snapshot?.rings.count ?? 0, 1) }
@@ -1619,6 +1628,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         let full = trayFrame(columns: columns)
         let ringX = full.minX + Layout.ringCenterX(index)
+        // Whatever branch follows, the bubble is wanted: supersede any in-flight
+        // fade-out (its completion would otherwise hide the bubble under the
+        // pointer and it wouldn't return until the ring is left and re-entered)
+        // and reclaim full opacity.
+        calloutHideGen += 1
+        if callout.isVisible { callout.alphaValue = 1 }
         // Same ring already up: swap the content in place so the bubble (and a
         // click in progress) survives the snapshot cadence; resize if needed.
         if callout.isVisible, calloutRing == index,
@@ -1643,11 +1658,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let frame = NSRect(x: x, y: full.minY - size.height + 4, width: size.width, height: size.height)
         callout.contentView = host
         calloutRing = index
-        calloutHideGen += 1 // cancel any in-flight fade-out
         if callout.isVisible {
-            // Re-hover during a fade / move to the other ring: reclaim full
-            // opacity and slide over (the swapped-in content plays its grow-in).
-            callout.alphaValue = 1
+            // Move to the other ring: slide over (the swapped-in content plays
+            // its own grow-in).
             NSAnimationContext.runAnimationGroup { ctx in
                 ctx.duration = 0.18
                 ctx.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
@@ -1713,18 +1726,52 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let pipe = Pipe()
         p.standardOutput = pipe
         p.standardError = FileHandle.nullDevice
-        pipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
-            self?.consume(handle.availableData)
+        let reader = pipe.fileHandleForReading
+        reader.readabilityHandler = { [weak self] handle in
+            let data = handle.availableData
+            // EOF: the streamer is gone. The fd stays "readable" forever, so the
+            // level-triggered source would call this ~1M times/s until the
+            // handler is cleared — one pinned core per dead streamer. Detach.
+            if data.isEmpty {
+                handle.readabilityHandler = nil
+                try? handle.close()
+                return
+            }
+            self?.consume(data)
         }
         p.terminationHandler = { [weak self] _ in
-            guard let self, !self.quitting else { return }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 5) { self.launchStreamer() }
+            reader.readabilityHandler = nil // idempotent with the EOF path above
+            guard let self else { return }
+            DispatchQueue.main.async {
+                guard !self.quitting else { return }
+                // Back off on repeated failures (5 s, 10 s, … capped at 60 s);
+                // a streamer that produced a snapshot resets the counter.
+                let delay = min(60, 5 * pow(2, Double(self.streamerFailures)))
+                self.streamerFailures += 1
+                self.buffer.removeAll() // a torn line must not corrupt the next stream
+                DispatchQueue.main.asyncAfter(deadline: .now() + delay) { self.launchStreamer() }
+            }
         }
         do {
             try p.run()
             proc = p
+            streamerStartedAt = Date()
         } catch {
             NSLog("Token Vision: could not launch node: \(error)")
+        }
+    }
+
+    /// Restart a streamer that is alive but has gone quiet (hung app-server
+    /// call, stuck event loop): no snapshot for `streamerSilenceLimit` seconds.
+    func startWatchdog() {
+        watchdog?.invalidate()
+        watchdog = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
+            guard let self, !self.quitting, let p = self.proc, p.isRunning else { return }
+            let since = max(self.lastSnapshotAt, self.streamerStartedAt)
+            if Date().timeIntervalSince(since) > Self.streamerSilenceLimit {
+                NSLog("Token Vision: streamer silent for %.0f s, restarting", Date().timeIntervalSince(since))
+                p.terminate() // terminationHandler relaunches it
+            }
         }
     }
 
@@ -1738,7 +1785,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 let obj = try? JSONSerialization.jsonObject(with: line),
                 let dict = obj as? [String: Any]
             else { continue }
-            DispatchQueue.main.async { self.model.apply(dict: dict) }
+            DispatchQueue.main.async {
+                self.lastSnapshotAt = Date()
+                self.streamerFailures = 0 // healthy again: relaunch cadence resets
+                self.model.apply(dict: dict)
+            }
         }
     }
 }

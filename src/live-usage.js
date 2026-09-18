@@ -119,6 +119,11 @@ export async function pollCodex(client, { days = 14, now = new Date(), codexHome
 }
 
 async function main() {
+  // One failed tick (a transient read error inside a timer callback) must not
+  // take the whole stream down: Node exits on an unhandled rejection by default.
+  process.on('unhandledRejection', (err) => {
+    console.error(`live-usage: ${err?.stack ?? err}`);
+  });
   const { values } = parseArgs({
     options: {
       interval: { type: 'string', default: '2' },

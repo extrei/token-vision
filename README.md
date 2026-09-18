@@ -3,7 +3,10 @@
 Live token usage for **Claude Code**, **OMP (oh-my-pi)** and **Codex**, in the
 terminal and in a macOS menu-bar widget. Zero dependencies, read-only, local only.
 
-![preview](https://raw.githubusercontent.com/extrei/token-vision/main/docs/preview.png)
+<p align="center">
+  <img src="https://raw.githubusercontent.com/extrei/token-vision/main/docs/preview.png" width="904"
+       alt="Token Vision in the menu bar: the tray with the Claude and Codex rings, each ring's callout with plan limits and clickable live sessions, and the rate-limited and desktop-app fallback states">
+</p>
 
 ## What it shows
 
@@ -38,6 +41,7 @@ node src/read-usage.js --json             # Codex account usage (account/usage/r
 node src/read-claude-usage.js --json      # Claude usage aggregated from transcripts
 
 sh widget/build.sh && ./widget/TokenVision &   # menu-bar widget; right-click to quit
+./widget/TokenVision --render docs/preview.png # re-render the image above, offscreen (sample data)
 
 sh widget/install-launch-agent.sh              # …or start it at login (per-user LaunchAgent,
 sh widget/install-launch-agent.sh --remove     #    relaunched after a crash, not after Quit)

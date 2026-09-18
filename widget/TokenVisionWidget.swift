@@ -1047,7 +1047,20 @@ struct CalloutView: View {
     @ObservedObject var model: Model
     var onOpen: (LiveSession) -> Void = { _ in }
     var onOpenApp: (LiveSession, HostApp) -> Void = { _, _ in }
-    @State private var shown = false
+    @State private var shown: Bool
+
+    /// `settled` skips the grow-in (offscreen renders capture the first frame).
+    init(ring: Ring, pointerOffset: CGFloat = 0, model: Model,
+         onOpen: @escaping (LiveSession) -> Void = { _ in },
+         onOpenApp: @escaping (LiveSession, HostApp) -> Void = { _, _ in },
+         settled: Bool = false) {
+        self.ring = ring
+        self.pointerOffset = pointerOffset
+        self.model = model
+        self.onOpen = onOpen
+        self.onOpenApp = onOpenApp
+        _shown = State(initialValue: settled)
+    }
 
     var body: some View {
         let live = ring.liveSessions
@@ -1843,35 +1856,26 @@ extension Array {
     subscript(safe i: Int) -> Element? { indices.contains(i) ? self[i] : nil }
 }
 
-// MARK: - Headless preview render (`TokenVision --render [outDir]`)
+// MARK: - Headless preview render (`TokenVision --render [outDir | file.png]`)
 //
-// Renders the real views offscreen to a PNG so the look can be checked without
-// Screen Recording permission or a live click. Not used in normal operation.
+// Renders the real views offscreen into the README image: two menu-bar scenes
+// (hovering the Claude ring, hovering the Codex ring) plus the states that a
+// screenshot rarely catches. Needs no Screen Recording permission or live
+// click, and doubles as a visual check. Always 2x, whatever display the process
+// happens to see. Sample data is invented. Not used in normal operation.
 
-func renderRep<V: View>(_ view: V) -> NSImage {
-    let host = NSHostingView(rootView: view)
-    host.wantsLayer = true
-    host.layoutSubtreeIfNeeded()
-    let size = host.fittingSize
-    host.frame = NSRect(origin: .zero, size: size)
-    host.layoutSubtreeIfNeeded()
-    // Force the layer tree to render, then composite it with alpha preserved so
-    // the tray's transparent shoulders/corners don't come out white.
-    if let rep = host.bitmapImageRepForCachingDisplay(in: host.bounds) {
-        host.cacheDisplay(in: host.bounds, to: rep)
-    }
-    let img = NSImage(size: size)
-    img.lockFocus()
-    if let ctx = NSGraphicsContext.current?.cgContext {
-        // Layers render top-left origin; the focus context is bottom-left. Flip.
-        ctx.saveGState()
-        ctx.translateBy(x: 0, y: size.height)
-        ctx.scaleBy(x: 1, y: -1)
-        host.layer?.render(in: ctx)
-        ctx.restoreGState()
-    }
-    img.unlockFocus()
-    return img
+let renderScale: CGFloat = 2
+
+/// A SwiftUI view as an image at `renderScale`, transparent where the view is.
+/// `pad` grows the canvas so a drop shadow isn't clipped.
+@MainActor
+func renderRep<V: View>(_ view: V, pad: CGFloat = 0) -> NSImage {
+    let renderer = ImageRenderer(content: view.padding(pad))
+    renderer.scale = renderScale
+    renderer.isOpaque = false
+    guard let cg = renderer.cgImage else { return NSImage() }
+    return NSImage(cgImage: cg, size: NSSize(width: CGFloat(cg.width) / renderScale,
+                                             height: CGFloat(cg.height) / renderScale))
 }
 
 func model(_ rings: [Ring]) -> Model {
@@ -1894,13 +1898,30 @@ func tint(_ image: NSImage, _ color: NSColor) -> NSImage {
     return out
 }
 
+/// The status icon as the menu bar shows it on a dark or light bar: template
+/// images get the bar's ink, the badged (non-template) one resolves its label
+/// color under that bar's appearance.
+func barIcon(badge: Int, darkBar: Bool) -> NSImage {
+    let icon = statusIcon(badge: badge)
+    if icon.isTemplate { return tint(icon, darkBar ? .white : .black) }
+    let out = NSImage(size: icon.size, flipped: false) { rect in
+        (NSAppearance(named: darkBar ? .darkAqua : .aqua) ?? NSAppearance.currentDrawing())
+            .performAsCurrentDrawingAppearance { icon.draw(in: rect) }
+        return true
+    }
+    return out
+}
+
+@MainActor
 func renderArtboards(to dir: String) {
     let now = Date()
     let soon = now.addingTimeInterval(51 * 60)
-    let thu = now.addingTimeInterval(3 * 24 * 3600)
+    let later = now.addingTimeInterval(3 * 24 * 3600)
     func w(_ id: String, _ label: String, _ p: Int, _ r: Date?) -> LimitWindow {
         LimitWindow(id: id, label: label, usedPercent: p, resetsAt: r)
     }
+
+    // ---- sample data (invented)
     let models = [
         ModelShare(model: "claude-fable-5-1", tokens: 1_520_000, messages: 340, claudeCode: 1_220_000, omp: 300_000),
         ModelShare(model: "claude-opus-4-1", tokens: 640_000, messages: 88, claudeCode: 640_000, omp: 0),
@@ -1908,125 +1929,225 @@ func renderArtboards(to dir: String) {
     ]
     let omp = OmpUsage(today: 12_300, lifetime: 9_870_000, messages: 210, costUsd: 12.34, perMinute: 4_000,
                        sessions: [
-        LiveSession(id: "o1", label: "worktree", kind: "user", model: "claude-fable-5-1", state: "running",
+        LiveSession(id: "o1", label: "infra", kind: "user", model: "claude-fable-5-1", state: "running",
                     ctxPercent: nil, total: 456_789, messages: 12, tokensPerMin: 3_000, ageSec: 5,
-                    source: "omp", cwd: "/Users/osika/worktree", tty: "ttys006",
+                    source: "omp", cwd: "/Users/me/code/infra", tty: "ttys006",
                     app: "/System/Applications/Utilities/Terminal.app"),
-        LiveSession(id: "o2", label: "widget", kind: "user", model: "claude-fable-5-1", state: "idle",
-                    ctxPercent: nil, total: 88_100, messages: 4, tokensPerMin: 0, ageSec: 400,
-                    source: "omp", cwd: "/Users/osika/widget", tty: "ttys004"),
     ])
     let claudeSessions = [
-        LiveSession(id: "c1", label: "Widget activity count with Anthropic and OpenAI models", kind: "bg",
+        LiveSession(id: "c1", label: "Refactor billing webhooks", kind: "bg",
                     model: nil, state: "running", ctxPercent: nil, total: nil, messages: nil, tokensPerMin: 0,
-                    ageSec: 12, source: "claude", cwd: "/Users/osika/widget", tty: "ttys006",
+                    ageSec: 12, source: "claude", cwd: "/Users/me/code/billing", tty: "ttys006",
                     termTty: "ttys005", attached: true, app: "/Applications/Warp.app",
                     url: "https://claude.ai/code/session_1", sessionKind: "bg"),
-        LiveSession(id: "c2", label: "landing page plan groundwork", kind: "bg", model: nil, state: "idle",
+        LiveSession(id: "c2", label: "Landing page copy", kind: "bg", model: nil, state: "idle",
                     ctxPercent: nil, total: nil, messages: nil, tokensPerMin: 0, ageSec: 240,
-                    source: "claude", cwd: "/Users/osika/html", tty: "ttys003",
+                    source: "claude", cwd: "/Users/me/code/site", tty: "ttys003",
                     url: "https://claude.ai/code/session_2", sessionKind: "bg"),
-        LiveSession(id: "c3", label: "html-b8", kind: "interactive", model: nil, state: "idle",
+        LiveSession(id: "c3", label: "api-7f", kind: "interactive", model: nil, state: "idle",
                     ctxPercent: nil, total: nil, messages: nil, tokensPerMin: 0, ageSec: 900,
-                    source: "claude", cwd: "/Users/osika/html", tty: "ttys005", app: "/Applications/Warp.app",
+                    source: "claude", cwd: "/Users/me/code/api", tty: "ttys005", app: "/Applications/Warp.app",
                     sessionKind: "interactive"),
-        LiveSession(id: "c4", label: "desktop chat", kind: "interactive", model: nil, state: "idle",
+        LiveSession(id: "c4", label: "Release notes draft", kind: "interactive", model: nil, state: "idle",
                     ctxPercent: nil, total: nil, messages: nil, tokensPerMin: 0, ageSec: 1500,
-                    source: "claude", cwd: "/Users/osika/notes", app: "/Applications/Claude.app",
+                    source: "claude", cwd: "/Users/me/notes", app: "/Applications/Claude.app",
                     sessionKind: "interactive"),
     ]
-    let claudeFresh = Ring(agent: .claude,
-                           windows: [w("c0", "Current session", 73, soon), w("c1", "All models", 7, thu)],
-                           note: nil, stale: false, asOf: now, models: models, omp: omp,
-                           claudeSessions: claudeSessions)
-    let sessions = [
+    let claudeLive = Ring(agent: .claude,
+                          windows: [w("c0", "Current session", 73, soon), w("c1", "All models", 7, later)],
+                          note: nil, stale: false, asOf: now, models: models, omp: omp,
+                          claudeSessions: claudeSessions)
+    let codexLive = Ring(agent: .codex, windows: [w("x0", "Current session", 21, soon), w("x1", "Weekly", 9, later)],
+                         note: nil, sessions: [
         LiveSession(id: "s1", label: "Archimedes", kind: "subagent", model: "gpt-5.6-sol", state: "running",
                     ctxPercent: 71, total: 29_400_000, messages: nil, tokensPerMin: 675_000, ageSec: 2,
                     originator: "Codex Desktop"),
-        LiveSession(id: "s2", label: "proj", kind: "user", model: "gpt-5.6-sol", state: "idle",
+        LiveSession(id: "s2", label: "ci", kind: "user", model: "gpt-5.6-sol", state: "idle",
                     ctxPercent: 31, total: 118_400_000, messages: nil, tokensPerMin: 0, ageSec: 90,
-                    title: "Reverse engineer Grok bots", cwd: "/Users/osika/Documents/proj",
+                    title: "Migrate CI to GitHub Actions", cwd: "/Users/me/code/ci",
                     originator: "Codex Desktop"),
         LiveSession(id: "s3", label: "Guardian review", kind: "guardian", model: "codex-auto-review", state: "idle",
                     ctxPercent: 8, total: 155_000, messages: nil, tokensPerMin: 0, ageSec: 40),
-    ]
-    let codexFresh = Ring(agent: .codex, windows: [w("x0", "Current session", 21, soon)], note: nil,
-                          sessions: sessions)
+    ])
+    // Claude Code's sign-in expired (only the desktop app was used): the numbers
+    // come from the desktop app's own samples.
+    let claudeViaDesktop = Ring(agent: .claude,
+                                windows: [w("d0", "Current session", 16, nil), w("d1", "All models", 7, later)],
+                                note: "Via the Claude desktop app · updated 9m ago", stale: false,
+                                asOf: now.addingTimeInterval(-540))
+    // Endpoint rate limited and no fresher source: last value kept, dimmed.
     let claudeStale = Ring(agent: .claude,
-                           windows: [w("c0", "Current session", 73, soon), w("c1", "All models", 7, thu)],
+                           windows: [w("c0", "Current session", 73, soon), w("c1", "All models", 7, later)],
                            note: "Rate limited · updated 3m ago", stale: true, asOf: now.addingTimeInterval(-180))
-    let codexFresh2 = Ring(agent: .codex, windows: [w("x0", "Current session", 52, soon)], note: nil)
+    let codexQuiet = Ring(agent: .codex, windows: [w("x0", "Current session", 52, soon)], note: nil)
 
-    // Two jobs finished since the tray was last opened: "landing page…" (Claude
-    // Code) and the Codex "proj" thread — red dot + ✓ in the lists, 2 on the icon.
-    let cm = model([claudeFresh, codexFresh])
-    cm.finishedAt["claude:c2"] = now.addingTimeInterval(-240)
-    cm.finishedAt["codex:s2"] = now.addingTimeInterval(-90)
-    cm.unread = ["claude:c2", "codex:s2"]
+    // Two jobs finished since the tray was last opened: red dot + ✓ in the
+    // lists, "2" on the icon.
+    let live = model([claudeLive, codexLive])
+    live.finishedAt["claude:c2"] = now.addingTimeInterval(-240)
+    live.finishedAt["codex:s2"] = now.addingTimeInterval(-90)
+    live.unread = ["claude:c2", "codex:s2"]
 
-    let trayFresh = renderRep(TrayView(model: cm))
-    let trayStale = renderRep(TrayView(model: model([claudeStale, codexFresh2])))
-    let callout = renderRep(CalloutView(ring: claudeFresh, model: cm))
-    let calloutCodex = renderRep(CalloutView(ring: codexFresh, model: cm))
-    let badgeIcon = statusIcon(badge: 2)
-    let plainIcon = statusIcon(badge: 0)
+    // ---- pieces
+    let shadowPad: CGFloat = 28
+    let trayLive = renderRep(TrayView(model: live), pad: shadowPad)
+    let trayStale = renderRep(TrayView(model: model([claudeStale, codexQuiet])), pad: shadowPad)
+    let calloutClaude = renderRep(CalloutView(ring: claudeLive, model: live, settled: true))
+    let calloutCodex = renderRep(CalloutView(ring: codexLive, model: live, settled: true))
+    let calloutDesktop = renderRep(CalloutView(ring: claudeViaDesktop, model: model([claudeViaDesktop]), settled: true))
 
-    let H: CGFloat = 1500
-    let canvas = NSImage(size: NSSize(width: 940, height: H))
-    canvas.lockFocus()
-    // desktop-ish backdrop
-    let bg = NSGradient(starting: NSColor(calibratedRed: 0.10, green: 0.11, blue: 0.14, alpha: 1),
-                        ending: NSColor(calibratedRed: 0.04, green: 0.04, blue: 0.06, alpha: 1))
-    bg?.draw(in: NSRect(x: 0, y: 0, width: 940, height: H), angle: -90)
-    func label(_ s: String, _ x: CGFloat, _ y: CGFloat) {
-        let attrs: [NSAttributedString.Key: Any] = [
-            .foregroundColor: NSColor.white.withAlphaComponent(0.65),
-            .font: NSFont.systemFont(ofSize: 13, weight: .medium),
-        ]
-        NSString(string: s).draw(at: NSPoint(x: x, y: y), withAttributes: attrs)
-    }
-    func place(_ img: NSImage, _ x: CGFloat, _ topY: CGFloat) {
-        // topY measured from the top edge; convert to bottom-left origin.
-        let s = img.size
-        img.draw(in: NSRect(x: x, y: H - topY - s.height, width: s.width, height: s.height))
-    }
-    label("Claude callout — Claude Code + OMP sessions (click to open)", 40, H - 40)
-    label("✓ finished · red dot = unread", 40, H - 58)
-    place(callout, 40, 80)
-    label("Expanded tray (dot = a thread is mid-turn)", 470, H - 40)
-    place(trayFresh, 470, 80)
-    label("Menu-bar icon: 2 unread finished jobs / none", 470, H - 330)
-    // Icons at 3x so the badge is legible in the preview; light and dark grounds.
-    for (i, (icon, ground)) in [(badgeIcon, NSColor.white), (badgeIcon, NSColor.black),
-                                (plainIcon, NSColor.white)].enumerated() {
-        let cell = NSRect(x: 470 + CGFloat(i) * 80, y: H - 420, width: 64, height: 64)
-        ground.setFill()
-        NSBezierPath(roundedRect: cell, xRadius: 10, yRadius: 10).fill()
-        let tinted = icon.isTemplate ? tint(icon, ground == .white ? .black : .white) : icon
-        tinted.draw(in: cell.insetBy(dx: 5, dy: 5))
-    }
-    label("Codex callout — threads titled from Codex's state DB", 470, H - 470)
-    place(calloutCodex, 470, 500)
-    label("Rate limited — last value kept, dimmed", 470, H - 1000)
-    place(trayStale, 470, 1030)
-    canvas.unlockFocus()
+    // ---- layout (points; y measured from the top of a panel)
+    let panelW: CGFloat = 440, gap: CGFloat = 24, barH: CGFloat = 30, margin: CGFloat = 26
+    let trayW = Layout.trayWidth(columns: 2)
+    let calloutTop = barH + Layout.trayHeight - 4 // the bubble's pointer tucks 4 pt under the tray
+    let calloutX: CGFloat = 26 // scene sits left; the bar's system items take the right
+    let caption: CGFloat = 22, iconRow: CGFloat = 38
+    let leftH = calloutTop + calloutClaude.size.height + 18 + caption + iconRow + margin
+    let rightH = calloutTop + calloutCodex.size.height + 18
+        + caption + calloutDesktop.size.height + 14
+        + caption + (Layout.trayHeight * 0.8) + margin
+    let H = max(leftH, rightH).rounded(.up)
+    let W = panelW * 2 + gap
 
-    guard let tiff = canvas.tiffRepresentation,
-          let rep = NSBitmapImageRep(data: tiff),
-          let png = rep.representation(using: .png, properties: [:]) else {
-        FileHandle.standardError.write("render failed\n".data(using: .utf8)!)
+    guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(W * renderScale),
+                                     pixelsHigh: Int(H * renderScale), bitsPerSample: 8, samplesPerPixel: 4,
+                                     hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB,
+                                     bytesPerRow: 0, bitsPerPixel: 0) else {
+        FileHandle.standardError.write("render failed: no bitmap\n".data(using: .utf8)!)
         exit(1)
     }
-    let path = (dir as NSString).appendingPathComponent("tokenvision-preview.png")
-    try? png.write(to: URL(fileURLWithPath: path))
-    print(path)
+    // Point size first: the context derives its points-to-pixels scale from it.
+    rep.size = NSSize(width: W, height: H)
+    guard let gctx = NSGraphicsContext(bitmapImageRep: rep) else {
+        FileHandle.standardError.write("render failed: no bitmap context\n".data(using: .utf8)!)
+        exit(1)
+    }
+    NSGraphicsContext.saveGraphicsState()
+    NSGraphicsContext.current = gctx
+    gctx.imageInterpolation = .high
+
+    /// Draw with the origin at a panel's top-left, y growing downward.
+    func place(_ img: NSImage, panelX: CGFloat, x: CGFloat, top: CGFloat, scale s: CGFloat = 1) {
+        let size = NSSize(width: img.size.width * s, height: img.size.height * s)
+        img.draw(in: NSRect(x: panelX + x, y: H - top - size.height, width: size.width, height: size.height))
+    }
+    func text(_ str: String, panelX: CGFloat, x: CGFloat, top: CGFloat, size: CGFloat = 12,
+              weight: NSFont.Weight = .medium, alpha: CGFloat = 0.92) {
+        let shadow = NSShadow()
+        shadow.shadowColor = NSColor.black.withAlphaComponent(0.35)
+        shadow.shadowBlurRadius = 3
+        shadow.shadowOffset = NSSize(width: 0, height: -1)
+        let attrs: [NSAttributedString.Key: Any] = [
+            .foregroundColor: NSColor.white.withAlphaComponent(alpha),
+            .font: NSFont.systemFont(ofSize: size, weight: weight), .shadow: shadow,
+        ]
+        let h = (str as NSString).size(withAttributes: attrs).height
+        (str as NSString).draw(at: NSPoint(x: panelX + x, y: H - top - h), withAttributes: attrs)
+    }
+    func symbol(_ names: [String], pointSize: CGFloat = 13) -> NSImage? {
+        for n in names {
+            if let img = NSImage(systemSymbolName: n, accessibilityDescription: nil)?
+                .withSymbolConfiguration(.init(pointSize: pointSize, weight: .medium)) { return tint(img, .white) }
+        }
+        return nil
+    }
+
+    /// One "screenshot": wallpaper, a translucent menu bar with the cat in it,
+    /// and the tray hanging centered under the (highlighted) status item.
+    func scene(panelX: CGFloat, iconCenterX: CGFloat, badge: Int, tray: NSImage) {
+        let frame = NSRect(x: panelX, y: 0, width: panelW, height: H)
+        NSGraphicsContext.saveGraphicsState()
+        NSBezierPath(roundedRect: frame, xRadius: 18, yRadius: 18).addClip()
+        // Wallpaper: a vertical three-stop gradient painted as exact one-pixel
+        // bands. NSGradient dithers, and that noise makes the PNG several times
+        // larger; flat rows look the same and compress to almost nothing.
+        let stops: [(CGFloat, CGFloat, CGFloat)] = [(0.17, 0.14, 0.45), (0.52, 0.23, 0.56), (0.95, 0.56, 0.36)]
+        let rows = Int(H * renderScale)
+        gctx.shouldAntialias = false
+        for i in 0..<rows {
+            let t = CGFloat(i) / CGFloat(max(rows - 1, 1)) * CGFloat(stops.count - 1)
+            let k = min(Int(t), stops.count - 2), f = t - CGFloat(k)
+            let (a, b) = (stops[k], stops[k + 1])
+            NSColor(calibratedRed: a.0 + (b.0 - a.0) * f, green: a.1 + (b.1 - a.1) * f,
+                    blue: a.2 + (b.2 - a.2) * f, alpha: 1).setFill()
+            NSRect(x: frame.minX, y: H - CGFloat(i + 1) / renderScale,
+                   width: frame.width, height: 1 / renderScale).fill()
+        }
+        gctx.shouldAntialias = true
+        // menu bar
+        NSColor.black.withAlphaComponent(0.26).setFill()
+        NSRect(x: panelX, y: H - barH, width: panelW, height: barH).fill()
+        text("Mon 9:41 AM", panelX: panelX, x: panelW - 96, top: 7, size: 13, weight: .medium, alpha: 0.96)
+        var x = panelW - 96 - 14
+        let itemLimit = iconCenterX + 15 + 12 // keep clear of the status item's slot
+        for names in [["switch.2"], ["magnifyingglass"], ["wifi"]] {
+            guard let img = symbol(names), x - img.size.width >= itemLimit else { continue }
+            x -= img.size.width
+            place(img, panelX: panelX, x: x, top: (barH - img.size.height) / 2)
+            x -= 16
+        }
+        // status item: highlighted while its tray is open
+        NSColor.white.withAlphaComponent(0.24).setFill()
+        NSBezierPath(roundedRect: NSRect(x: panelX + iconCenterX - 15, y: H - barH + 4, width: 30, height: barH - 8),
+                     xRadius: 6, yRadius: 6).fill()
+        place(barIcon(badge: badge, darkBar: true), panelX: panelX, x: iconCenterX - 9, top: (barH - 18) / 2)
+        // tray, flush under the bar (the rendered image carries `shadowPad` all round)
+        place(tray, panelX: panelX, x: iconCenterX - trayW / 2 - shadowPad, top: barH - shadowPad)
+        NSGraphicsContext.restoreGraphicsState()
+    }
+
+    // Left: hovering the Claude ring. The bubble is centered in the panel, so the
+    // tray sits where ring 0 lands above its pointer.
+    let leftX: CGFloat = 0
+    let leftIcon = calloutX + Layout.calloutWidth / 2 - Layout.ringCenterX(0) + trayW / 2
+    scene(panelX: leftX, iconCenterX: leftIcon, badge: 2, tray: trayLive)
+    place(calloutClaude, panelX: leftX, x: calloutX, top: calloutTop)
+    var ly = calloutTop + calloutClaude.size.height + 18
+    text("Menu-bar icon: light bar · dark bar · unread finished jobs", panelX: leftX, x: calloutX, top: ly)
+    ly += caption
+    for (i, (badge, dark)) in [(0, false), (0, true), (3, true)].enumerated() {
+        let cell = NSRect(x: leftX + calloutX + CGFloat(i) * 74, y: H - ly - iconRow, width: 64, height: iconRow)
+        (dark ? NSColor(calibratedWhite: 0.13, alpha: 0.92) : NSColor(calibratedWhite: 0.96, alpha: 0.96)).setFill()
+        NSBezierPath(roundedRect: cell, xRadius: 9, yRadius: 9).fill()
+        barIcon(badge: badge, darkBar: dark).draw(in: NSRect(x: cell.midX - 13, y: cell.midY - 13, width: 26, height: 26))
+    }
+
+    // Right: hovering the Codex ring, then the states a screenshot rarely catches.
+    let rightX = panelW + gap
+    let rightIcon = calloutX + Layout.calloutWidth / 2 - Layout.ringCenterX(1) + trayW / 2
+    scene(panelX: rightX, iconCenterX: rightIcon, badge: 2, tray: trayLive)
+    place(calloutCodex, panelX: rightX, x: calloutX, top: calloutTop)
+    var y = calloutTop + calloutCodex.size.height + 18
+    text("Claude Code sign-in expired: the desktop app's numbers", panelX: rightX, x: calloutX, top: y)
+    y += caption
+    place(calloutDesktop, panelX: rightX, x: calloutX, top: y)
+    y += calloutDesktop.size.height + 14
+    text("Rate limited: last value kept, dimmed", panelX: rightX, x: calloutX, top: y)
+    y += caption
+    place(trayStale, panelX: rightX, x: calloutX - shadowPad * 0.8, top: y - shadowPad * 0.8, scale: 0.8)
+
+    NSGraphicsContext.restoreGraphicsState()
+    guard let png = rep.representation(using: .png, properties: [:]) else {
+        FileHandle.standardError.write("render failed: no png\n".data(using: .utf8)!)
+        exit(1)
+    }
+    // `--render docs/preview.png` writes that file; a directory gets the default name.
+    let path = dir.lowercased().hasSuffix(".png")
+        ? dir : (dir as NSString).appendingPathComponent("tokenvision-preview.png")
+    do {
+        try png.write(to: URL(fileURLWithPath: path))
+    } catch {
+        FileHandle.standardError.write("render failed: \(error.localizedDescription)\n".data(using: .utf8)!)
+        exit(1)
+    }
+    print("\(path)  \(Int(W))x\(Int(H)) pt @\(Int(renderScale))x")
 }
 
 if let idx = CommandLine.arguments.firstIndex(of: "--render") {
     let dir = CommandLine.arguments[safe: idx + 1] ?? NSTemporaryDirectory()
     let app = NSApplication.shared
     app.setActivationPolicy(.accessory)
-    renderArtboards(to: dir)
+    MainActor.assumeIsolated { renderArtboards(to: dir) }
     exit(0)
 }
 

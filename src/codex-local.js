@@ -7,7 +7,8 @@ import { homedir } from 'node:os';
  * `account/usage/read` buckets typically stop at yesterday, but every local
  * session rollout under `<codexHome>/sessions/YYYY/MM/DD/rollout-*.jsonl`
  * logs `token_count` events whose `last_token_usage.total_tokens` is the
- * per-turn delta. Summing those by event timestamp reconstructs a same-day
+ * per-turn delta. Summing those by event timestamp — each response once, since
+ * Codex re-emits the line verbatim now and then — reconstructs a same-day
  * total. It is a floor, not the truth — usage from other devices or cloud
  * tasks is invisible locally — so callers overlay it with `max()`.
  *
@@ -20,7 +21,11 @@ export function defaultCodexHome() {
   return process.env.CODEX_HOME || join(homedir(), '.codex');
 }
 
-/** Parse one rollout line into {date, tokens} or null. */
+/**
+ * Parse one rollout line into {date, tokens, total} or null. `tokens` is the
+ * response's own size (`last_token_usage`), `total` the thread's cumulative
+ * counter (`total_token_usage`, null when the line doesn't carry one).
+ */
 export function extractTokenCountEvent(line) {
   if (!line.includes('"token_count"')) return null;
   let d;
@@ -33,17 +38,33 @@ export function extractTokenCountEvent(line) {
   if (!p || p.type !== 'token_count' || typeof d.timestamp !== 'string') return null;
   const tokens = p.info?.last_token_usage?.total_tokens ?? 0;
   if (tokens <= 0) return null;
-  return { date: d.timestamp.slice(0, 10), tokens };
+  const total = p.info?.total_token_usage?.total_tokens;
+  return { date: d.timestamp.slice(0, 10), tokens, total: typeof total === 'number' ? total : null };
 }
 
 const utcDate = (ms) => new Date(ms).toISOString().slice(0, 10);
 const dayDir = (codexHome, date) => join(codexHome, 'sessions', ...date.split('-'));
 
-function tokensByDate(text) {
+/**
+ * Codex re-emits a `token_count` line verbatim after compaction, a settings
+ * change or a rate-limit refresh. Nothing was spent in between, so the thread's
+ * cumulative counter has not moved: an event whose (last, total) pair equals the
+ * previous event's is such a repeat and must not be summed again. (Same signal
+ * codex-session-watch.mjs uses.) A line without a cumulative total can't be
+ * told apart from a real response of the same size, so it always counts.
+ */
+export function isReemission(event, prev) {
+  return prev !== null && event.total !== null && event.total === prev.total && event.tokens === prev.tokens;
+}
+
+export function tokensByDate(text) {
   const byDate = new Map();
+  let prev = null;
   for (const line of text.split('\n')) {
     const event = extractTokenCountEvent(line);
-    if (event) byDate.set(event.date, (byDate.get(event.date) ?? 0) + event.tokens);
+    if (!event) continue;
+    if (!isReemission(event, prev)) byDate.set(event.date, (byDate.get(event.date) ?? 0) + event.tokens);
+    prev = event;
   }
   return byDate;
 }

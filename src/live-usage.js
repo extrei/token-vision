@@ -36,7 +36,7 @@ export function createLiveState({
   const tailer = new TranscriptTailer(claudeDir ? { claudeDir } : {});
   const rate = new RateWindow();
   const entries = [];
-  const rated = new Set();
+  const rated = new Map(); // response key -> tokens already fed to the rate window
   const ompState = omp
     ? new OmpLiveState({ ...(ompDir && { ompDir }), activeWindow: ompSessionWindow, now })
     : null;
@@ -70,10 +70,15 @@ export function createLiveState({
       for (const e of fresh) {
         entries.push(e);
         const total = e.tokens.input + e.tokens.output + e.tokens.cacheCreation + e.tokens.cacheRead;
-        // Recent entries feed the live rate window, each API response once.
-        if (e.timestampMs && nowMs - e.timestampMs <= rate.maxAgeMs && !rated.has(e.key)) {
-          if (e.key !== null) rated.add(e.key);
-          rate.add(e.timestampMs, total);
+        // Recent entries feed the live rate window, each API response once. A
+        // response arrives as several lines whose output count grows, so add
+        // only what the newest snapshot brings over the largest one seen.
+        if (e.timestampMs && nowMs - e.timestampMs <= rate.maxAgeMs) {
+          const fed = e.key !== null ? rated.get(e.key) ?? 0 : 0;
+          if (total > fed) {
+            rate.add(e.timestampMs, total - fed);
+            if (e.key !== null) rated.set(e.key, total);
+          }
         }
       }
       return fresh.length;

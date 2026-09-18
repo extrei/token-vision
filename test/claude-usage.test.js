@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
-import { extractUsageEntry, summarize, readClaudeUsage } from '../src/claude-usage.js';
+import { extractUsageEntry, summarize, dedupeUsageEntries, readClaudeUsage } from '../src/claude-usage.js';
 
 const FIXTURE_DIR = fileURLToPath(new URL('./fixtures/claude-dir', import.meta.url));
 
@@ -281,4 +281,64 @@ test('readClaudeUsage on a nonexistent claudeDir yields a zero-usage report with
   assert.equal(report.summary.longestStreakDays, null);
   assert.deepEqual(report.dailyUsageBuckets, []);
   assert.deepEqual(report.modelBreakdown, []);
+});
+
+// --- one response, several transcript lines -----------------------------------
+
+test('summarize keeps the largest snapshot of a response, not the first (message_start placeholder)', () => {
+  // One API response written as three lines (one per content block): input and
+  // cache numbers are final from the start, output_tokens only on the last.
+  const snap = (output) => entry({ key: 'msg_1:req_1', date: '2026-08-29', input: 3, cacheRead: 20_000, output });
+  const report = summarize([snap(1), snap(500), snap(12_345)], { now: NOW });
+  assert.equal(report.summary.assistantMessages, 1);
+  assert.equal(report.summary.outputTokens, 12_345);
+  assert.equal(report.summary.inputTokens, 3);
+  assert.equal(report.summary.cacheReadTokens, 20_000);
+  assert.equal(report.summary.lifetimeTokens, 3 + 20_000 + 12_345);
+  assert.deepEqual(report.modelBreakdown, [{ model: 'claude-opus-5', tokens: 32_348, messages: 1 }]);
+});
+
+test('summarize: the largest snapshot wins whatever order the lines are scanned in', () => {
+  // Resumed / forked sessions copy a response's lines into other files, so the
+  // final snapshot can be seen before an earlier one.
+  const snap = (output) => entry({ key: 'msg_1:req_1', date: '2026-08-29', input: 3, output });
+  for (const order of [[1, 500, 900], [900, 1, 500], [500, 900, 1], [900, 900, 900]]) {
+    assert.equal(summarize(order.map(snap), { now: NOW }).summary.outputTokens, 900, `order ${order}`);
+  }
+});
+
+test('summarize: day and model come from the snapshot that is kept', () => {
+  const report = summarize([
+    entry({ key: 'k', date: '2026-08-28', model: 'claude-opus-5', output: 1 }),
+    entry({ key: 'k', date: '2026-08-29', model: 'claude-opus-5', output: 700 }),
+    entry({ key: 'other', date: '2026-08-28', model: 'claude-haiku-4-5', output: 40 }),
+  ], { now: NOW });
+  assert.deepEqual(report.dailyUsageBuckets, [
+    { startDate: '2026-08-28', tokens: 40 },
+    { startDate: '2026-08-29', tokens: 700 },
+  ]);
+  assert.equal(report.summary.assistantMessages, 2);
+});
+
+test('dedupeUsageEntries: one entry per key (first-seen order), every unkeyed entry kept', () => {
+  const a1 = entry({ key: 'a', date: '2026-08-29', output: 1 });
+  const a2 = entry({ key: 'a', date: '2026-08-29', output: 50 });
+  const b = entry({ key: 'b', date: '2026-08-29', output: 7 });
+  const n1 = entry({ date: '2026-08-29', output: 2 });
+  const n2 = entry({ date: '2026-08-29', output: 2 });
+  assert.deepEqual(dedupeUsageEntries([a1, n1, b, a2, n2]), [n1, n2, a2, b]);
+  assert.deepEqual(dedupeUsageEntries([]), []);
+});
+
+test('end to end: transcript lines of one response collapse to its final usage', () => {
+  const block = (uuid, output) => line({
+    type: 'assistant', uuid, requestId: 'req_9', timestamp: '2026-08-29T10:00:00.000Z',
+    message: { id: 'msg_9', model: 'claude-opus-5',
+      usage: { input_tokens: 4, cache_creation_input_tokens: 100, cache_read_input_tokens: 9_000, output_tokens: output } },
+  });
+  const entries = [block('u1', 1), block('u2', 1), block('u3', 2_048)].map((l) => extractUsageEntry(l));
+  const report = summarize(entries, { now: NOW });
+  assert.equal(report.summary.assistantMessages, 1);
+  assert.equal(report.summary.outputTokens, 2_048);
+  assert.equal(report.summary.lifetimeTokens, 4 + 100 + 9_000 + 2_048);
 });

@@ -49,8 +49,9 @@ export function extractUsageEntry(line, { timestamps = false } = {}) {
   };
   if (totalTokens(tokens) === 0) return null;
   return {
-    // The same API response can be rewritten into several transcript lines
-    // (resumed/forked sessions), so dedupe on message id + request id.
+    // One API response spans several transcript lines (one per content block,
+    // plus copies in resumed/forked sessions): message id + request id is what
+    // ties them together — see dedupeUsageEntries.
     key: msg.id && d.requestId ? `${msg.id}:${d.requestId}` : (d.uuid ?? null),
     date: d.timestamp.slice(0, 10),
     model: msg.model ?? 'unknown',
@@ -78,19 +79,38 @@ function streaks(dates, now) {
   return { current, longest };
 }
 
+/**
+ * One entry per API response. Claude Code writes a transcript line per content
+ * block, all under the same message id + request id, and the usage on those
+ * lines is a running snapshot: input and cache counts are already final on the
+ * first, but `output_tokens` only reaches the billed figure on the last (the
+ * first is often the `message_start` placeholder, 1-2 tokens). Resumed and
+ * forked sessions copy those lines into other files too, so "last seen" depends
+ * on scan order. Keeping the largest snapshot is order-independent and is the
+ * final one. Entries without a key can't be matched up, so each one counts.
+ */
+export function dedupeUsageEntries(entries) {
+  const best = new Map(); // key -> largest snapshot, in first-seen order
+  const unkeyed = [];
+  for (const e of entries) {
+    if (e.key === null) {
+      unkeyed.push(e);
+      continue;
+    }
+    const prev = best.get(e.key);
+    if (!prev || totalTokens(e.tokens) > totalTokens(prev.tokens)) best.set(e.key, e);
+  }
+  return [...unkeyed, ...best.values()];
+}
+
 /** Aggregate deduplicated usage entries into a Codex-style usage response. */
 export function summarize(entries, { now = new Date() } = {}) {
-  const seen = new Set();
   const byDay = new Map();
   const byModel = new Map();
   const totals = { input: 0, output: 0, cacheCreation: 0, cacheRead: 0 };
   let messages = 0;
 
-  for (const e of entries) {
-    if (e.key !== null) {
-      if (seen.has(e.key)) continue;
-      seen.add(e.key);
-    }
+  for (const e of dedupeUsageEntries(entries)) {
     messages++;
     for (const k of Object.keys(totals)) totals[k] += e.tokens[k];
     const n = totalTokens(e.tokens);

@@ -1,6 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
+import { mkdtemp, mkdir, rm, writeFile, appendFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { createLiveState } from '../src/live-usage.js';
@@ -76,4 +79,54 @@ test('CLI --once with mock codex shows codex usage and no rate-limit line', asyn
   assert.ok(!stdout.includes('limit'));
   assert.ok(!stdout.includes('window'));
   assert.ok(!stdout.includes('░'));
+});
+
+// One API response is written as several transcript lines whose output_tokens
+// grows; the live rate must end up with the response's final size, once.
+const block = (uuid, output, timestamp, id = 'msg_live') => JSON.stringify({
+  type: 'assistant', uuid, requestId: `req_${id}`, timestamp,
+  message: { id, model: 'claude-opus-5',
+    usage: { input_tokens: 10, cache_creation_input_tokens: 0, cache_read_input_tokens: 1_000, output_tokens: output } },
+});
+
+async function liveDir(t) {
+  const dir = await mkdtemp(join(tmpdir(), 'live-rate-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  await mkdir(join(dir, 'projects', 'proj'), { recursive: true });
+  return { dir, file: join(dir, 'projects', 'proj', 'session.jsonl') };
+}
+
+test('createLiveState: rate counts a response once at its final size, lines seen in one scan', async (t) => {
+  const { dir, file } = await liveDir(t);
+  await writeFile(file, [
+    block('u1', 1, '2026-08-30T11:59:30.000Z'),
+    block('u2', 1, '2026-08-30T11:59:31.000Z'),
+    block('u3', 600, '2026-08-30T11:59:40.000Z'),
+  ].join('\n') + '\n');
+  const state = createLiveState({ claudeDir: dir, now: NOW, omp: false, claudeSessions: false });
+  await state.scanClaude();
+  const frame = state.claudeFrame();
+  assert.equal(frame.perMinute, 10 + 1_000 + 600); // not 1011 (first line), not 3*… (every line)
+  assert.equal(frame.summary.outputTokens, 600);
+  assert.equal(frame.summary.assistantMessages, 1);
+});
+
+test('createLiveState: rate adds only the growth when later lines of a response arrive in a later scan', async (t) => {
+  const { dir, file } = await liveDir(t);
+  await writeFile(file, block('u1', 1, '2026-08-30T11:59:30.000Z') + '\n');
+  const state = createLiveState({ claudeDir: dir, now: NOW, omp: false, claudeSessions: false });
+  await state.scanClaude();
+  assert.equal(state.claudeFrame().perMinute, 10 + 1_000 + 1);
+  await appendFile(file, block('u2', 450, '2026-08-30T11:59:45.000Z') + '\n');
+  await state.scanClaude();
+  assert.equal(state.claudeFrame().perMinute, 10 + 1_000 + 450);
+  // A copy of an earlier, smaller snapshot (forked session) changes nothing…
+  await appendFile(file, block('u3', 200, '2026-08-30T11:59:50.000Z') + '\n');
+  await state.scanClaude();
+  assert.equal(state.claudeFrame().perMinute, 10 + 1_000 + 450);
+  // …and a second response adds its own size.
+  await appendFile(file, block('u4', 90, '2026-08-30T11:59:55.000Z', 'msg_two') + '\n');
+  await state.scanClaude();
+  assert.equal(state.claudeFrame().perMinute, (10 + 1_000 + 450) + (10 + 1_000 + 90));
+  assert.equal(state.claudeFrame().summary.assistantMessages, 2);
 });

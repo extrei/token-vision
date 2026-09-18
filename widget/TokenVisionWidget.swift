@@ -99,7 +99,7 @@ func friendlyLimitNote(_ err: String?) -> String {
     guard let err else { return "Limits unavailable" }
     let lower = err.lowercased()
     if err.contains("429") || lower.contains("rate") { return "Rate limited — retrying" }
-    if err.contains("401") || lower.contains("auth") { return "Open Claude to refresh sign-in" }
+    if err.contains("401") || lower.contains("auth") { return "Claude Code sign-in expired — run claude once" }
     if lower.contains("no limit windows") { return "No data from Claude" }
     return err
 }
@@ -108,7 +108,7 @@ func friendlyLimitNote(_ err: String?) -> String {
 func staleReason(_ err: String?) -> String {
     guard let err else { return "Rate limited" } // stale with no detail → assume throttle
     let lower = err.lowercased()
-    if err.contains("401") || lower.contains("auth") { return "Sign in to Claude to refresh" }
+    if err.contains("401") || lower.contains("auth") { return "Claude Code sign-in expired" }
     if err.contains("429") || lower.contains("rate") { return "Rate limited" }
     if lower.contains("no limit windows") { return "No data from Claude" }
     return "Update paused"
@@ -420,9 +420,16 @@ struct Snapshot {
             let stale = (c["limitsStale"] as? Bool ?? false) && !windows.isEmpty
             let asOf = resetDate(c["limitsAsOf"])
             let err = c["limitsError"] as? String
+            // "desktop": the usage endpoint couldn't be read (Claude Code's token
+            // expires when only the desktop app is used), so these numbers are
+            // the Claude desktop app's own plan-usage samples.
+            let viaDesktop = (c["limitsSource"] as? String) == "desktop"
             let note: String?
             if windows.isEmpty {
                 note = friendlyLimitNote(err)
+            } else if viaDesktop {
+                let ago = agoLabel(asOf).map { " · updated \($0)" } ?? ""
+                note = "Via the Claude desktop app" + ago
             } else if stale {
                 note = staleNote(err, asOf: asOf)
             } else {

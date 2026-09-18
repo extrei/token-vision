@@ -172,6 +172,106 @@ export function reduceLimitsState(prev, outcome, { now, baseMs, maxBackoffMs = 1
   };
 }
 
+/**
+ * Second source: the Claude desktop app. While it is open it samples the same
+ * plan limits about every 15 minutes and appends them to
+ * `~/Library/Application Support/Claude/plan-usage-history.json` as
+ * `{ t, org, u: { fh, sd } }` — five-hour and seven-day utilization, percent.
+ *
+ * It matters because the endpoint above is read with Claude Code's OAuth token,
+ * which lives 8 hours and is only renewed when Claude Code itself runs. Work
+ * only in the desktop app for a day and every fetch fails with "auth expired":
+ * the ring freezes on old numbers while desktop usage keeps climbing. The
+ * desktop file is fresh exactly then, needs no credentials, and is read-only.
+ * (The token is deliberately not refreshed here: refresh tokens rotate, and
+ * spending Claude Code's from another process would log it out.)
+ */
+export function desktopUsageHistoryPath() {
+  return join(homedir(), 'Library', 'Application Support', 'Claude', 'plan-usage-history.json');
+}
+
+/** Organization of the Claude Code login, to pick the matching desktop samples. */
+export async function readClaudeCodeOrg({
+  path = process.env.CLAUDE_CONFIG_DIR
+    ? join(process.env.CLAUDE_CONFIG_DIR, '.claude.json')
+    : join(homedir(), '.claude.json'),
+} = {}) {
+  try {
+    const org = JSON.parse(await readFile(path, 'utf8')).oauthAccount?.organizationUuid;
+    return typeof org === 'string' && org ? org : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Newest usable sample as `{ t, session, weekly }`, or null. With a known
+ * `org`, only that organization's samples count (another org's numbers would
+ * be a different plan); with none, the newest sample wins.
+ */
+export function pickDesktopSample(history, { org } = {}) {
+  const samples = Array.isArray(history?.samples) ? history.samples : [];
+  let best = null;
+  for (const s of samples) {
+    if (!s || typeof s.t !== 'number' || !s.u || typeof s.u !== 'object') continue;
+    if (org && s.org !== org) continue;
+    const { fh, sd } = s.u;
+    if (typeof fh !== 'number' && typeof sd !== 'number') continue;
+    if (!best || s.t > best.t) {
+      best = {
+        t: s.t,
+        session: typeof fh === 'number' ? Math.round(fh) : null,
+        weekly: typeof sd === 'number' ? Math.round(sd) : null,
+      };
+    }
+  }
+  return best;
+}
+
+export async function readDesktopPlanUsage({ path = desktopUsageHistoryPath(), org } = {}) {
+  try {
+    return pickDesktopSample(JSON.parse(await readFile(path, 'utf8')), { org });
+  } catch {
+    return null; // desktop app not installed / file mid-write
+  }
+}
+
+/**
+ * Overlay a desktop sample on the endpoint's result. A healthy endpoint always
+ * wins (it polls more often and carries reset times and every window). When it
+ * is stale or has nothing, a desktop sample newer than the last good fetch
+ * takes over the session/weekly windows; reset times are carried from the
+ * last-good windows while they are still in the future. The result is marked
+ * `source: 'desktop'`, and `stale` only once the sample itself is old.
+ */
+export function overlayDesktopUsage(limits, sample, { now = Date.now(), freshMs = 30 * 60_000 } = {}) {
+  if (!sample) return limits;
+  const healthy = limits?.windows?.length && !limits.stale;
+  if (healthy) return limits;
+  if (sample.t <= (limits?.fetchedAt ?? 0)) return limits;
+  const carriedReset = (name) => {
+    const prev = limits?.windows?.find((w) => w.name === name)?.resetsAt ?? null;
+    if (prev == null) return null;
+    const ms = typeof prev === 'number' ? prev * 1000 : Date.parse(prev);
+    return Number.isFinite(ms) && ms > now ? prev : null;
+  };
+  const windows = [];
+  if (sample.session != null) {
+    windows.push({ name: 'session', usedPercent: sample.session, resetsAt: carriedReset('session') });
+  }
+  if (sample.weekly != null) {
+    windows.push({ name: 'weekly', usedPercent: sample.weekly, resetsAt: carriedReset('weekly') });
+  }
+  if (!windows.length) return limits;
+  return {
+    windows,
+    fetchedAt: sample.t,
+    source: 'desktop',
+    ...(now - sample.t > freshMs && { stale: true }),
+    ...(limits?.error && { error: limits.error }),
+  };
+}
+
 /** Token lookup + fetch in one step. */
 export async function readClaudeLimits(opts = {}) {
   const token = await getClaudeOAuthToken(opts);

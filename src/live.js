@@ -249,6 +249,9 @@ export function buildSnapshot({ now = new Date(), claude, codex, codexSessions, 
         limits: cl.windows,
         ...(cl.fetchedAt != null && { limitsAsOf: cl.fetchedAt }),
         ...(cl.stale && { limitsStale: true }),
+        // 'desktop' when the numbers come from the Claude desktop app's own
+        // samples because the endpoint could not be read.
+        ...(cl.source && { limitsSource: cl.source }),
         // Carry the reason alongside stale windows too, so the widget can say
         // "sign in to refresh" instead of always "rate limited".
         ...(cl.stale && cl.error && { limitsError: cl.error }),

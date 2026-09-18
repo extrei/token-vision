@@ -13,6 +13,9 @@ import {
   readCachedLimits,
   writeCachedLimits,
   reduceLimitsState,
+  readDesktopPlanUsage,
+  readClaudeCodeOrg,
+  overlayDesktopUsage,
 } from './claude-limits.js';
 
 /**
@@ -142,6 +145,7 @@ async function main() {
       'codex-session-window': { type: 'string', default: '600' },
       'no-omp': { type: 'boolean', default: false },
       'no-claude-sessions': { type: 'boolean', default: false },
+      'no-desktop-usage': { type: 'boolean', default: false },
       'omp-dir': { type: 'string' },
       'omp-session-window': { type: 'string', default: '600' },
       help: { type: 'boolean', short: 'h', default: false },
@@ -171,6 +175,8 @@ Options:
                         written within this many seconds (default: 600)
   --no-omp              Skip Claude usage made through OMP (oh-my-pi)
   --no-claude-sessions  Skip the live Claude Code process list (~/.claude/sessions)
+  --no-desktop-usage    Don't fall back to the Claude desktop app's plan-usage samples
+                        when the limits endpoint can't be read
   --omp-dir <dir>       OMP home (default: $OMP_HOME or ~/.omp)
   --omp-session-window <s>  An OMP session counts as current while its file
                         was written within this many seconds (default: 600)
@@ -253,35 +259,57 @@ Options:
   const baseLimitsMs = Number(values['claude-limits-interval']) * 1000;
   const maxBackoffMs = 15 * 60_000;
   const limitsState = { last: null, fails: 0, nextAt: 0 };
-  let claudeLimits = null;
+  let endpointLimits = null; // what the usage endpoint (or its cache) last gave us
+  let claudeLimits = null; // what is published: endpoint, or the desktop app's sample
+
+  // The endpoint is read with Claude Code's 8-hour OAuth token, which only
+  // Claude Code renews. After a day spent in the desktop app every fetch is
+  // "auth expired" — so fall back to the plan-usage samples the desktop app
+  // itself records (same org only), which are fresh exactly then.
+  let claudeOrg;
+  const applyDesktopUsage = async () => {
+    if (values['no-desktop-usage']) {
+      claudeLimits = endpointLimits;
+      return;
+    }
+    claudeOrg ??= await readClaudeCodeOrg();
+    const sample = await readDesktopPlanUsage({ org: claudeOrg ?? undefined });
+    claudeLimits = overlayDesktopUsage(endpointLimits, sample, { now: Date.now() });
+  };
 
   const seedClaudeLimits = async () => {
     if (values['no-claude-limits']) return;
     const cached = await readCachedLimits();
     if (cached) {
       limitsState.last = cached;
-      claudeLimits = { ...cached, stale: true };
+      endpointLimits = { ...cached, stale: true };
+      claudeLimits = endpointLimits;
     }
   };
 
   const refreshClaudeLimits = async () => {
     if (values['no-claude-limits']) return;
-    if (Date.now() < limitsState.nextAt) return; // still backing off
-    let outcome;
-    try {
-      outcome = { ok: true, windows: (await readClaudeLimits()).windows };
-    } catch (err) {
-      outcome = { ok: false, error: err };
+    if (Date.now() >= limitsState.nextAt) {
+      // (skipped while backing off; the desktop overlay below still refreshes)
+      let outcome;
+      try {
+        outcome = { ok: true, windows: (await readClaudeLimits()).windows };
+      } catch (err) {
+        outcome = { ok: false, error: err };
+      }
+      const now = Date.now();
+      const { state, limits, cache } = reduceLimitsState(limitsState, outcome, {
+        now,
+        baseMs: baseLimitsMs,
+        maxBackoffMs,
+      });
+      Object.assign(limitsState, state);
+      endpointLimits = limits;
+      if (cache) await writeCachedLimits(cache, { fetchedAt: now });
     }
-    const now = Date.now();
-    const { state, limits, cache } = reduceLimitsState(limitsState, outcome, {
-      now,
-      baseMs: baseLimitsMs,
-      maxBackoffMs,
+    await applyDesktopUsage().catch(() => {
+      claudeLimits = endpointLimits;
     });
-    Object.assign(limitsState, state);
-    claudeLimits = limits;
-    if (cache) await writeCachedLimits(cache, { fetchedAt: now });
   };
 
   const claudeState = () => ({

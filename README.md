@@ -53,6 +53,16 @@ sh widget/install-launch-agent.sh --remove     #    relaunched after a crash, no
   entries whose process is gone and pre-warmed `spare` processes are skipped.
   The pty and hosting app come from one `ps` pass. Disable with
   `--no-claude-sessions`.
+- **Claude plan limits** come from the OAuth usage endpoint, read with Claude
+  Code's token. That token lives 8 hours and only Claude Code renews it, so
+  after a day spent in the Claude desktop app every fetch is "auth expired".
+  The streamer then falls back to the samples the desktop app itself appends
+  to `~/Library/Application Support/Claude/plan-usage-history.json` (5-hour and
+  7-day utilization, every ~15 min, same organization only) and marks the
+  snapshot `limitsSource: "desktop"`; the widget notes "Via the Claude desktop
+  app". A healthy endpoint always wins. Disable with `--no-desktop-usage`.
+  Desktop *chat* tokens are never on disk, so they show in the plan percent
+  only, not in the token counts.
 - **Codex thread titles** are read from `~/.codex/state_5.sqlite` (table
   `threads`, opened read-only through `node:sqlite`) every 30 s; without them a
   thread is labelled by its folder.

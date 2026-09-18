@@ -10,6 +10,10 @@ import {
   normalizeLimits,
   fetchClaudeLimits,
   reduceLimitsState,
+  pickDesktopSample,
+  readDesktopPlanUsage,
+  readClaudeCodeOrg,
+  overlayDesktopUsage,
   limitsCachePath,
   readCachedLimits,
   writeCachedLimits,
@@ -346,3 +350,126 @@ test('reduceLimitsState: failure with no prior data → error object, no stale w
   assert.match(r.limits.error, /429/);
   assert.ok(!('windows' in r.limits));
 });
+
+// ---------------------------------------------------------------- desktop app fallback
+
+const ORG = '11111111-2222-4333-8444-555555555555';
+const OTHER = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
+const HISTORY = {
+  version: 2,
+  samples: [
+    { t: 1000, org: ORG, u: { fh: 5, sd: 3 } },
+    { t: 3000, org: OTHER, u: { fh: 100, sd: 24, xu: 72.08 } },
+    { t: 2000, org: ORG, u: { fh: 15.6, sd: 7.2 } },
+    { t: 4000, org: ORG, u: {} }, // no usable numbers
+    { t: 'bad', org: ORG, u: { fh: 1, sd: 1 } },
+    null,
+  ],
+};
+
+test('pickDesktopSample: newest sample of the matching org, rounded; other orgs ignored', () => {
+  assert.deepEqual(pickDesktopSample(HISTORY, { org: ORG }), { t: 2000, session: 16, weekly: 7 });
+  assert.deepEqual(pickDesktopSample(HISTORY, { org: OTHER }), { t: 3000, session: 100, weekly: 24 });
+});
+
+test('pickDesktopSample: unknown org -> newest overall; no match / junk -> null', () => {
+  assert.deepEqual(pickDesktopSample(HISTORY), { t: 3000, session: 100, weekly: 24 });
+  assert.equal(pickDesktopSample(HISTORY, { org: 'nobody' }), null);
+  assert.equal(pickDesktopSample({}), null);
+  assert.equal(pickDesktopSample(null), null);
+  assert.equal(pickDesktopSample({ samples: 'x' }), null);
+});
+
+test('pickDesktopSample: a sample with only one of the two windows is still usable', () => {
+  assert.deepEqual(pickDesktopSample({ samples: [{ t: 9, org: ORG, u: { sd: 4 } }] }, { org: ORG }),
+    { t: 9, session: null, weekly: 4 });
+});
+
+test('readDesktopPlanUsage / readClaudeCodeOrg: read from disk; missing or corrupt -> null', async (t) => {
+  const dir = await tempDir(t);
+  const hist = join(dir, 'plan-usage-history.json');
+  await writeFile(hist, JSON.stringify(HISTORY));
+  assert.deepEqual(await readDesktopPlanUsage({ path: hist, org: ORG }), { t: 2000, session: 16, weekly: 7 });
+  assert.equal(await readDesktopPlanUsage({ path: join(dir, 'nope.json') }), null);
+  const bad = join(dir, 'bad.json');
+  await writeFile(bad, '{ nope');
+  assert.equal(await readDesktopPlanUsage({ path: bad }), null);
+
+  const cfg = join(dir, '.claude.json');
+  await writeFile(cfg, JSON.stringify({ oauthAccount: { organizationUuid: ORG } }));
+  assert.equal(await readClaudeCodeOrg({ path: cfg }), ORG);
+  await writeFile(cfg, JSON.stringify({ oauthAccount: {} }));
+  assert.equal(await readClaudeCodeOrg({ path: cfg }), null);
+  assert.equal(await readClaudeCodeOrg({ path: join(dir, 'missing.json') }), null);
+});
+
+const OV_NOW = 10_000_000;
+const sample = (over = {}) => ({ t: OV_NOW - 60_000, session: 16, weekly: 7, ...over });
+const FUTURE = new Date(OV_NOW + 3_600_000).toISOString();
+const PAST = new Date(OV_NOW - 3_600_000).toISOString();
+
+test('overlayDesktopUsage: a healthy endpoint always wins; no sample is a no-op', () => {
+  const healthy = { windows: [{ name: 'session', usedPercent: 1, resetsAt: null }], fetchedAt: 1 };
+  assert.equal(overlayDesktopUsage(healthy, sample(), { now: OV_NOW }), healthy);
+  const stale = { ...healthy, stale: true, error: 'auth expired' };
+  assert.equal(overlayDesktopUsage(stale, null, { now: OV_NOW }), stale);
+  assert.equal(overlayDesktopUsage(null, null, { now: OV_NOW }), null);
+});
+
+test('overlayDesktopUsage: stale endpoint + newer sample -> desktop numbers, fresh, reason kept', () => {
+  const stale = {
+    windows: [
+      { name: 'session', usedPercent: 0, resetsAt: PAST },
+      { name: 'weekly', usedPercent: 2, resetsAt: FUTURE },
+      { name: 'weekly opus', usedPercent: 1, resetsAt: FUTURE },
+    ],
+    fetchedAt: OV_NOW - 48 * 3_600_000,
+    stale: true,
+    error: 'auth expired — open claude to refresh',
+  };
+  const out = overlayDesktopUsage(stale, sample(), { now: OV_NOW });
+  assert.deepEqual(out, {
+    windows: [
+      { name: 'session', usedPercent: 16, resetsAt: null }, // its old reset already passed
+      { name: 'weekly', usedPercent: 7, resetsAt: FUTURE }, // still-valid reset carried over
+    ],
+    fetchedAt: OV_NOW - 60_000,
+    source: 'desktop',
+    error: 'auth expired — open claude to refresh',
+  });
+  assert.ok(!('stale' in out));
+});
+
+test('overlayDesktopUsage: works with no endpoint data at all (never fetched)', () => {
+  const out = overlayDesktopUsage({ error: 'auth expired' }, sample(), { now: OV_NOW });
+  assert.deepEqual(out.windows.map((w) => [w.name, w.usedPercent]), [['session', 16], ['weekly', 7]]);
+  assert.equal(out.source, 'desktop');
+  const fromNull = overlayDesktopUsage(null, sample(), { now: OV_NOW });
+  assert.equal(fromNull.source, 'desktop');
+  assert.ok(!('error' in fromNull));
+});
+
+test('overlayDesktopUsage: a sample older than the last good fetch is ignored; an old sample is stale', () => {
+  const stale = { windows: [{ name: 'session', usedPercent: 9, resetsAt: null }], fetchedAt: OV_NOW - 30_000, stale: true };
+  assert.equal(overlayDesktopUsage(stale, sample({ t: OV_NOW - 60_000 }), { now: OV_NOW }), stale);
+  const old = overlayDesktopUsage({ error: 'x' }, sample({ t: OV_NOW - 2 * 3_600_000 }), { now: OV_NOW });
+  assert.equal(old.stale, true);
+  assert.equal(old.source, 'desktop');
+});
+
+test('overlayDesktopUsage: epoch-second reset times are honoured; a sample with no numbers is a no-op', () => {
+  const stale = { windows: [{ name: 'weekly', usedPercent: 2, resetsAt: (OV_NOW + 5_000_000) / 1000 }], fetchedAt: 1, stale: true };
+  const out = overlayDesktopUsage(stale, sample({ session: null }), { now: OV_NOW });
+  assert.deepEqual(out.windows, [{ name: 'weekly', usedPercent: 7, resetsAt: (OV_NOW + 5_000_000) / 1000 }]);
+  assert.equal(overlayDesktopUsage(stale, sample({ session: null, weekly: null }), { now: OV_NOW }), stale);
+});
+
+test('buildSnapshot: limitsSource is carried when the numbers come from the desktop app', () => {
+  const windows = [{ name: 'session', usedPercent: 16, resetsAt: null }];
+  const snap = buildSnapshot({ now: NOW, claude: claudeState({ windows, fetchedAt: 5, source: 'desktop' }) });
+  assert.equal(snap.claude.limitsSource, 'desktop');
+  assert.ok(!('limitsStale' in snap.claude));
+  const plain = buildSnapshot({ now: NOW, claude: claudeState({ windows, fetchedAt: 5 }) });
+  assert.ok(!('limitsSource' in plain.claude));
+});
+

@@ -43,6 +43,44 @@ test('normalizeLimits: realistic payload → ordered, renamed, rounded windows',
   ]);
 });
 
+test('normalizeLimits: limits[] names the model-scoped weekly window; placeholder keys are dropped', () => {
+  const raw = {
+    five_hour: { utilization: 11, resets_at: '2026-09-23T12:00:00Z' },
+    seven_day: { utilization: 22, resets_at: '2026-09-26T08:00:00Z' },
+    seven_day_opus: null,
+    nimbus_quill: { utilization: 0, resets_at: null },
+    limits: [
+      { kind: 'session', percent: 11, resets_at: '2026-09-23T12:00:00Z', scope: null },
+      { kind: 'weekly_all', percent: 22, resets_at: '2026-09-26T08:00:00Z', scope: null },
+      { kind: 'weekly_scoped', percent: 38, resets_at: '2026-09-26T08:00:01Z', scope: { model: { id: null, display_name: 'Fable' } } },
+    ],
+  };
+  assert.deepEqual(normalizeLimits(raw), [
+    { name: 'session', usedPercent: 11, resetsAt: '2026-09-23T12:00:00Z' },
+    { name: 'weekly', usedPercent: 22, resetsAt: '2026-09-26T08:00:00Z' },
+    { name: 'weekly fable', usedPercent: 38, resetsAt: '2026-09-26T08:00:01Z' },
+  ]);
+});
+
+test('normalizeLimits: locked_reason or an unrecognised severity marks a window spent; warning does not', () => {
+  const raw = {
+    limits: [
+      { kind: 'session', percent: 100, resets_at: null, severity: 'exceeded', locked_reason: null },
+      { kind: 'weekly_all', percent: 76, resets_at: null, severity: 'warning', locked_reason: null },
+      { kind: 'weekly_scoped', percent: 40, resets_at: null, severity: 'normal', locked_reason: 'org_cap',
+        scope: { model: { display_name: 'Fable' } } },
+    ],
+  };
+  assert.deepEqual(normalizeLimits(raw), [
+    { name: 'session', usedPercent: 100, resetsAt: null, spent: true },
+    { name: 'weekly', usedPercent: 76, resetsAt: null },
+    { name: 'weekly fable', usedPercent: 40, resetsAt: null, spent: true },
+  ]);
+  assert.deepEqual(normalizeLimits({ five_hour: { utilization: 100, resets_at: null, locked_reason: 'x' } }), [
+    { name: 'session', usedPercent: 100, resetsAt: null, spent: true },
+  ]);
+});
+
 test('normalizeLimits: camelCase resetsAt is used when resets_at is absent', () => {
   assert.deepEqual(normalizeLimits({ five_hour: { utilization: 10, resetsAt: '2026-08-30T17:00:00Z' } }), [
     { name: 'session', usedPercent: 10, resetsAt: '2026-08-30T17:00:00Z' },

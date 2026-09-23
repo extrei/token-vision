@@ -135,6 +135,7 @@ func windowLabel(claudeName: String) -> String {
     switch claudeName {
     case "session": return "Current session"
     case "weekly": return "All models"
+    case "weekly fable": return "Fable usage"
     case "weekly opus": return "Opus"
     case "weekly sonnet": return "Sonnet"
     default: return claudeName.prefix(1).uppercased() + claudeName.dropFirst()
@@ -177,6 +178,13 @@ struct LimitWindow: Identifiable {
     let label: String
     let usedPercent: Int
     let resetsAt: Date?
+    /// The provider says this limit is reached (locked), whatever the percent.
+    var spent: Bool = false
+}
+
+/// A window's colour: the provider's own "spent" beats the percent bands.
+func windowColor(_ window: LimitWindow) -> Color {
+    window.spent ? Palette.high : Palette.severity(window.usedPercent)
 }
 
 /// One live thread — a Codex rollout (`codex.sessions`) or an OMP session
@@ -320,31 +328,6 @@ func parseSessions(_ raw: Any?, source: String) -> [LiveSession] {
     }
 }
 
-/// Lifetime Claude usage of one model, split by source (`claude.models`).
-struct ModelShare: Identifiable {
-    let model: String
-    let tokens: Double
-    let messages: Int
-    let claudeCode: Double // tokens seen via Claude Code transcripts
-    let omp: Double        // tokens seen via OMP (oh-my-pi)
-    var id: String { model }
-    /// "fable-5-1" for "claude-fable-5-1" — the vendor prefix is implied.
-    var shortName: String { model.hasPrefix("claude-") ? String(model.dropFirst(7)) : model }
-}
-
-func parseModels(_ raw: Any?) -> [ModelShare] {
-    ((raw as? [[String: Any]]) ?? []).compactMap { m in
-        guard let model = m["model"] as? String else { return nil }
-        return ModelShare(
-            model: model,
-            tokens: num(m["tokens"]) ?? 0,
-            messages: Int(num(m["messages"]) ?? 0),
-            claudeCode: num(m["claudeCode"]) ?? 0,
-            omp: num(m["omp"]) ?? 0
-        )
-    }
-}
-
 /// OMP (oh-my-pi) usage block (`claude.omp`); absent when OMP tracking is off.
 struct OmpUsage {
     let today: Double
@@ -386,14 +369,14 @@ struct Ring: Identifiable {
     var errorText: String?
     /// Live threads (Codex only); independent of the plan-limit windows.
     var sessions: [LiveSession] = []
-    /// Per-model lifetime breakdown (Claude only; empty for Codex).
-    var models: [ModelShare] = []
     /// OMP usage and live sessions (Claude only; nil when OMP is off).
     var omp: OmpUsage?
     /// Live Claude Code processes (Claude only), from Claude Code's own registry.
     var claudeSessions: [LiveSession] = []
     var id: String { agent.rawValue }
-    var percent: Int? { windows.map(\.usedPercent).max() }
+    /// The fullest window: the ring and its number are drawn from it.
+    var headline: LimitWindow? { windows.max { $0.usedPercent < $1.usedPercent } }
+    var percent: Int? { headline?.usedPercent }
     var running: Bool {
         sessions.contains { $0.running } || (omp?.running ?? 0) > 0 || claudeSessions.contains { $0.running }
     }
@@ -418,7 +401,8 @@ struct Snapshot {
                     id: "claude-\(i)",
                     label: windowLabel(claudeName: w["name"] as? String ?? "limit"),
                     usedPercent: Int(num(w["usedPercent"]) ?? 0),
-                    resetsAt: resetDate(w["resetsAt"])
+                    resetsAt: resetDate(w["resetsAt"]),
+                    spent: w["spent"] as? Bool ?? false
                 )
             }
             let stale = (c["limitsStale"] as? Bool ?? false) && !windows.isEmpty
@@ -441,7 +425,7 @@ struct Snapshot {
             }
             rings.append(Ring(agent: .claude, windows: windows, note: note,
                               stale: stale, asOf: asOf, errorText: err,
-                              models: parseModels(c["models"]), omp: parseOmp(c["omp"]),
+                              omp: parseOmp(c["omp"]),
                               claudeSessions: parseSessions(c["sessions"], source: "claude")))
         }
         if let x = dict["codex"] as? [String: Any] {
@@ -452,20 +436,17 @@ struct Snapshot {
             } else if let error = x["error"] as? String {
                 note = error
             } else {
-                if let used = num(x["usedPercent"]) {
+                // One entry per rate-limit window Codex reports: the account-wide
+                // group first, then per-model groups, which carry a `name`.
+                for w in (x["windows"] as? [[String: Any]]) ?? [] {
+                    guard let id = w["id"] as? String, let used = num(w["usedPercent"]) else { continue }
+                    let kind = windowLabel(codexMins: num(w["windowMins"]))
                     windows.append(LimitWindow(
-                        id: "codex-primary",
-                        label: windowLabel(codexMins: num(x["windowMins"])),
+                        id: "codex-\(id)",
+                        label: (w["name"] as? String).map { "\($0) · \(kind)" } ?? kind,
                         usedPercent: Int(used),
-                        resetsAt: resetDate(x["resetsAt"])
-                    ))
-                }
-                if let s = x["secondary"] as? [String: Any], let used = num(s["usedPercent"]) {
-                    windows.append(LimitWindow(
-                        id: "codex-secondary",
-                        label: windowLabel(codexMins: num(s["windowMins"])),
-                        usedPercent: Int(used),
-                        resetsAt: resetDate(s["resetsAt"])
+                        resetsAt: resetDate(w["resetsAt"]),
+                        spent: w["spent"] as? Bool ?? false
                     ))
                 }
                 if windows.isEmpty { note = "limits unavailable" }
@@ -630,10 +611,10 @@ struct RingView: View {
             ZStack {
                 Circle()
                     .stroke(Palette.track, lineWidth: Layout.ringStroke)
-                if let pct {
+                if let headline = ring.headline {
                     Circle()
-                        .trim(from: 0, to: CGFloat(min(max(pct, 0), 100)) / 100)
-                        .stroke(Palette.severity(pct),
+                        .trim(from: 0, to: CGFloat(min(max(headline.usedPercent, 0), 100)) / 100)
+                        .stroke(windowColor(headline),
                                 style: StrokeStyle(lineWidth: Layout.ringStroke, lineCap: .round))
                         .rotationEffect(.degrees(-90))
                         .opacity(dim)
@@ -883,7 +864,7 @@ struct CalloutRow: View {
     let window: LimitWindow
 
     var body: some View {
-        let color = Palette.severity(window.usedPercent)
+        let color = windowColor(window)
         VStack(alignment: .leading, spacing: 6) {
             Text(window.label)
                 .font(.system(size: 12))
@@ -897,9 +878,9 @@ struct CalloutRow: View {
             }
             .frame(height: 4)
             HStack {
-                Text("\(window.usedPercent)% Used")
+                Text(window.spent ? "Limit reached" : "\(window.usedPercent)% Used")
                     .font(.system(size: 12).monospacedDigit())
-                    .foregroundStyle(.white)
+                    .foregroundStyle(window.spent ? color : .white)
                 Spacer()
                 if let reset = resetLabel(window.resetsAt) {
                     Text(reset)
@@ -1083,62 +1064,6 @@ struct SessionList: View {
     }
 }
 
-/// One model's share of Claude tokens: name, bar relative to the top model,
-/// total, and (when both sources contributed) the Claude Code / OMP split.
-struct ModelShareRow: View {
-    let share: ModelShare
-    let maxTokens: Double
-
-    var body: some View {
-        let frac = maxTokens > 0 ? min(max(share.tokens / maxTokens, 0), 1) : 0
-        VStack(alignment: .leading, spacing: 4) {
-            HStack {
-                Text(share.shortName)
-                    .font(.system(size: 12))
-                    .foregroundStyle(.white.opacity(0.85))
-                    .lineLimit(1)
-                Spacer(minLength: 8)
-                Text(compactTokens(share.tokens))
-                    .font(.system(size: 12).monospacedDigit())
-                    .foregroundStyle(.white)
-            }
-            GeometryReader { geo in
-                ZStack(alignment: .leading) {
-                    Capsule().fill(Color.white.opacity(0.18))
-                    Capsule().fill(Color.white.opacity(0.7))
-                        .frame(width: max(3, geo.size.width * CGFloat(frac)))
-                }
-            }
-            .frame(height: 3)
-            if share.claudeCode > 0 && share.omp > 0 {
-                Text("Claude Code \(compactTokens(share.claudeCode)) · OMP \(compactTokens(share.omp))")
-                    .font(.system(size: 10.5).monospacedDigit())
-                    .foregroundStyle(.white.opacity(0.5))
-            }
-        }
-    }
-}
-
-struct ModelShareSection: View {
-    static let maxRows = 5
-    let models: [ModelShare]
-
-    var body: some View {
-        let top = models.map(\.tokens).max() ?? 0
-        Group {
-            Text("By model")
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(.white.opacity(0.85))
-            ForEach(models.prefix(Self.maxRows)) { ModelShareRow(share: $0, maxTokens: top) }
-            if models.count > Self.maxRows {
-                Text("+\(models.count - Self.maxRows) more")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.white.opacity(0.5))
-            }
-        }
-    }
-}
-
 /// OMP totals (today / lifetime / cost). Its live sessions are listed in the
 /// Claude callout's unified session list, tagged "OMP".
 struct OmpSection: View {
@@ -1218,10 +1143,6 @@ struct CalloutView: View {
                                 unreadKeys: model.unread,
                                 onOpen: onOpen,
                                 onOpenApp: onOpenApp)
-                }
-                if !ring.models.isEmpty {
-                    CalloutDivider()
-                    ModelShareSection(models: ring.models)
                 }
                 if let omp = ring.omp {
                     CalloutDivider()
@@ -2074,11 +1995,6 @@ func renderArtboards(to dir: String, offscreen: Bool) {
     }
 
     // ---- sample data (invented)
-    let models = [
-        ModelShare(model: "claude-fable-5-1", tokens: 1_520_000, messages: 340, claudeCode: 1_220_000, omp: 300_000),
-        ModelShare(model: "claude-opus-4-1", tokens: 640_000, messages: 88, claudeCode: 640_000, omp: 0),
-        ModelShare(model: "claude-haiku-4-5", tokens: 95_000, messages: 410, claudeCode: 20_000, omp: 75_000),
-    ]
     let omp = OmpUsage(today: 12_300, lifetime: 9_870_000, messages: 210, costUsd: 12.34, perMinute: 4_000,
                        sessions: [
         LiveSession(id: "o1", label: "infra", kind: "user", model: "claude-fable-5-1", state: "running",
@@ -2107,7 +2023,7 @@ func renderArtboards(to dir: String, offscreen: Bool) {
     ]
     let claudeLive = Ring(agent: .claude,
                           windows: [w("c0", "Current session", 73, soon), w("c1", "All models", 7, later)],
-                          note: nil, stale: false, asOf: now, models: models, omp: omp,
+                          note: nil, stale: false, asOf: now, omp: omp,
                           claudeSessions: claudeSessions)
     let codexLive = Ring(agent: .codex, windows: [w("x0", "Current session", 21, soon), w("x1", "Weekly", 9, later)],
                          note: nil, sessions: [

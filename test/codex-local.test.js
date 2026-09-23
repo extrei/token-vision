@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   extractTokenCountEvent,
-  isReemission,
+  tokensAdded,
   tokensByDate,
   CodexSessionScanner,
   localTodayTokens,
@@ -18,7 +18,11 @@ const utc = (daysBack) => new Date(NOW.getTime() - daysBack * 86_400_000).toISOS
 const TODAY = utc(0); // 2026-08-30
 const YESTERDAY = utc(1); // 2026-08-29
 
-/** One realistic token_count rollout line (no trailing newline). */
+/**
+ * One token_count rollout line (no trailing newline) without a cumulative
+ * counter, so each line counts its own size: these fixtures exercise the
+ * scanner's bucketing and caching, not the counter arithmetic.
+ */
 const tokenLine = (timestamp, tokens) =>
   JSON.stringify({
     timestamp,
@@ -26,14 +30,6 @@ const tokenLine = (timestamp, tokens) =>
     payload: {
       type: 'token_count',
       info: {
-        total_token_usage: {
-          input_tokens: 100,
-          cached_input_tokens: 0,
-          cache_write_input_tokens: 0,
-          output_tokens: 100,
-          reasoning_output_tokens: 0,
-          total_tokens: 200,
-        },
         last_token_usage: {
           input_tokens: 0,
           cached_input_tokens: 0,
@@ -341,13 +337,15 @@ test('extractTokenCountEvent: total is the cumulative counter, null when the lin
   assert.deepEqual(extractTokenCountEvent(usageLine(at('09:00:00'), 500)), { date: TODAY, tokens: 500, total: null });
 });
 
-test('isReemission: same (last, total) as the previous event; never without a total or a previous event', () => {
+test('tokensAdded: the counter\'s difference when it carries on; the response size when it restarted or is missing', () => {
   const ev = (tokens, total) => ({ date: TODAY, tokens, total });
-  assert.equal(isReemission(ev(500, 1500), ev(500, 1500)), true);
-  assert.equal(isReemission(ev(500, 2000), ev(500, 1500)), false); // same size, counter moved: a real response
-  assert.equal(isReemission(ev(400, 1500), ev(500, 1500)), false);
-  assert.equal(isReemission(ev(500, null), ev(500, null)), false); // can't be told apart: count it
-  assert.equal(isReemission(ev(500, 1500), null), false);
+  assert.equal(tokensAdded(ev(500, 1500), ev(500, 1500)), 0); // re-emitted verbatim
+  assert.equal(tokensAdded(ev(500, 2000), ev(500, 1500)), 500); // same size, counter moved
+  assert.equal(tokensAdded(ev(520, 2000), ev(500, 1500)), 500); // the counter wins over the per-turn figure
+  assert.equal(tokensAdded(ev(400, 1500), ev(500, 1500)), 0);
+  assert.equal(tokensAdded(ev(300, 300), ev(500, 1500)), 300); // counter restarted
+  assert.equal(tokensAdded(ev(500, null), ev(500, null)), 500); // no counter: count the line
+  assert.equal(tokensAdded(ev(500, 1500), null), 500);
 });
 
 test('tokensByDate: a verbatim re-emission is summed once (compaction / settings / rate-limit refresh)', () => {

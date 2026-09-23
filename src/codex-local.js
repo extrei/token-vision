@@ -6,11 +6,11 @@ import { homedir } from 'node:os';
  * Local fallback for the Codex backend's daily-usage lag: the
  * `account/usage/read` buckets typically stop at yesterday, but every local
  * session rollout under `<codexHome>/sessions/YYYY/MM/DD/rollout-*.jsonl`
- * logs `token_count` events whose `last_token_usage.total_tokens` is the
- * per-turn delta. Summing those by event timestamp — each response once, since
- * Codex re-emits the line verbatim now and then — reconstructs a same-day
- * total. It is a floor, not the truth — usage from other devices or cloud
- * tasks is invisible locally — so callers overlay it with `max()`.
+ * logs `token_count` events carrying the thread's running total
+ * (`total_token_usage`). Differencing that counter by event timestamp
+ * reconstructs a same-day total. It is a floor, not the truth — usage from
+ * other devices or cloud tasks is invisible locally — so callers overlay it
+ * with `max()`.
  *
  * Rollout files live in the day directory of the session's START, while a
  * long-lived session keeps appending events for days — hence the lookback
@@ -46,15 +46,17 @@ const utcDate = (ms) => new Date(ms).toISOString().slice(0, 10);
 const dayDir = (codexHome, date) => join(codexHome, 'sessions', ...date.split('-'));
 
 /**
- * Codex re-emits a `token_count` line verbatim after compaction, a settings
- * change or a rate-limit refresh. Nothing was spent in between, so the thread's
- * cumulative counter has not moved: an event whose (last, total) pair equals the
- * previous event's is such a repeat and must not be summed again. (Same signal
- * codex-session-watch.mjs uses.) A line without a cumulative total can't be
- * told apart from a real response of the same size, so it always counts.
+ * What one event adds to its day. The thread's cumulative counter is the
+ * truth whenever the line carries it and it has not gone backwards: the
+ * difference since the previous line is exact, and a line Codex re-emitted
+ * verbatim (after compaction, a settings change or a rate-limit refresh) adds
+ * zero. Summing per-turn `last_token_usage` instead over-counts (Pulse measured
+ * 6% high on one long session). A counter that restarted (thread reloaded) or
+ * a line without one falls back to the response's own size.
  */
-export function isReemission(event, prev) {
-  return prev !== null && event.total !== null && event.total === prev.total && event.tokens === prev.tokens;
+export function tokensAdded(event, prev) {
+  if (event.total !== null && prev?.total != null && event.total >= prev.total) return event.total - prev.total;
+  return event.tokens;
 }
 
 export function tokensByDate(text) {
@@ -63,7 +65,8 @@ export function tokensByDate(text) {
   for (const line of text.split('\n')) {
     const event = extractTokenCountEvent(line);
     if (!event) continue;
-    if (!isReemission(event, prev)) byDate.set(event.date, (byDate.get(event.date) ?? 0) + event.tokens);
+    const added = tokensAdded(event, prev);
+    if (added > 0) byDate.set(event.date, (byDate.get(event.date) ?? 0) + added);
     prev = event;
   }
   return byDate;

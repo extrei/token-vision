@@ -203,6 +203,45 @@ export function compactSession(s, now = new Date(), { titleOf } = {}) {
 }
 
 /**
+ * Codex's rate-limit groups flattened to windows. `account/rateLimits/read`
+ * reports one group per limit id: the account-wide one (no `limitName`) and
+ * per-model ones. A slot's duration says what it is, never the slot itself:
+ * Pro has no 5-hour window, so its weekly window arrives as `primary` with
+ * no `secondary`. "Limit reached" is a group-level fact, pinned to the
+ * group's fullest window rather than smeared across both.
+ */
+export function codexLimitWindows(reply) {
+  if (!reply || typeof reply !== 'object') return [];
+  const byId = reply.rateLimitsByLimitId;
+  const groups = byId && typeof byId === 'object'
+    ? Object.values(byId)
+    : reply.rateLimits && typeof reply.rateLimits === 'object' ? [reply.rateLimits] : [];
+  const named = (g) => (typeof g.limitName === 'string' ? g.limitName : null);
+  const windows = [];
+  for (const group of groups.filter((g) => g && typeof g === 'object').sort((a, b) => (named(a) ? 1 : 0) - (named(b) ? 1 : 0))) {
+    const name = named(group);
+    const own = [];
+    for (const slot of ['primary', 'secondary']) {
+      const node = group[slot];
+      if (!node || typeof node !== 'object' || typeof node.usedPercent !== 'number') continue;
+      own.push({
+        id: `${group.limitId ?? 'codex'}.${slot}`,
+        ...(name && { name }),
+        usedPercent: node.usedPercent,
+        windowMins: node.windowDurationMins ?? null,
+        resetsAt: node.resetsAt ?? null,
+      });
+    }
+    const reached = group.spendControlReached === true
+      || group.rateLimitReachedType != null
+      || (!name && reply.ordinaryUsageAllowed === false);
+    if (reached && own.length) own.reduce((a, b) => (b.usedPercent > a.usedPercent ? b : a)).spent = true;
+    windows.push(...own);
+  }
+  return windows;
+}
+
+/**
  * Merge the Claude Code and OMP per-model breakdowns into one list, largest
  * first, keeping the per-source split so the widget can show where the tokens
  * came from. Pure.
@@ -265,25 +304,13 @@ export function buildSnapshot({ now = new Date(), claude, codex, codexSessions, 
     } else if (codex.error) {
       snapshot.codex = { error: codex.error };
     } else {
-      const primary = codex.rateLimits?.rateLimits?.primary;
-      const secondary = codex.rateLimits?.rateLimits?.secondary;
+      const windows = codexLimitWindows(codex.rateLimits);
       snapshot.codex = {
         today: codex.today,
         ...(codex.todayEstimated && { todayEstimated: true }),
         lifetime: codex.summary?.lifetimeTokens ?? 0,
         ...(codex.daily && { daily: codex.daily }),
-        ...(primary && {
-          usedPercent: primary.usedPercent ?? 0,
-          windowMins: primary.windowDurationMins ?? null,
-          resetsAt: primary.resetsAt ?? null,
-        }),
-        ...(secondary && {
-          secondary: {
-            usedPercent: secondary.usedPercent ?? 0,
-            windowMins: secondary.windowDurationMins ?? null,
-            resetsAt: secondary.resetsAt ?? null,
-          },
-        }),
+        ...(windows.length && { windows }),
         ...(codex.rateLimits?.rateLimits?.planType && {
           planType: codex.rateLimits.rateLimits.planType,
         }),

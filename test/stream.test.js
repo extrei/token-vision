@@ -4,7 +4,7 @@ import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
-import { buildSnapshot } from '../src/live.js';
+import { codexLimitWindows, buildSnapshot } from '../src/live.js';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const FIXTURE = 'test/fixtures/claude-dir';
@@ -72,7 +72,7 @@ test('buildSnapshot: codex error -> error passed through', () => {
   assert.deepEqual(snap.codex, { error: 'spawn codex ENOENT' });
 });
 
-test('buildSnapshot: full codex with rate limits maps primary/secondary windows and planType', () => {
+test('buildSnapshot: full codex with rate limits maps both slots to windows and keeps planType', () => {
   const snap = buildSnapshot({
     now: NOW,
     codex: {
@@ -90,12 +90,40 @@ test('buildSnapshot: full codex with rate limits maps primary/secondary windows 
   assert.deepEqual(snap.codex, {
     today: 54321,
     lifetime: 12345678,
-    usedPercent: 37,
-    windowMins: 300,
-    resetsAt: 1767225600,
-    secondary: { usedPercent: 12, windowMins: 10080, resetsAt: 1767830400 },
+    windows: [
+      { id: 'codex.primary', usedPercent: 37, windowMins: 300, resetsAt: 1767225600 },
+      { id: 'codex.secondary', usedPercent: 12, windowMins: 10080, resetsAt: 1767830400 },
+    ],
     planType: 'pro',
   });
+});
+
+test('codexLimitWindows: every limit group, account-wide first; reached pins the group\'s fullest window', () => {
+  const reply = {
+    ordinaryUsageAllowed: true,
+    rateLimits: { limitId: 'codex', limitName: null, primary: { usedPercent: 29, windowDurationMins: 10080, resetsAt: 1 } },
+    rateLimitsByLimitId: {
+      base_model_inference: {
+        limitId: 'base_model_inference', limitName: 'gpt-reserve',
+        primary: { usedPercent: 90, windowDurationMins: 300, resetsAt: 2 },
+        secondary: { usedPercent: 40, windowDurationMins: 10080, resetsAt: 3 },
+        rateLimitReachedType: 'primary_window',
+      },
+      codex: {
+        limitId: 'codex', limitName: null, secondary: null, spendControlReached: false, rateLimitReachedType: null,
+        primary: { usedPercent: 29, windowDurationMins: 10080, resetsAt: 1 },
+      },
+    },
+  };
+  assert.deepEqual(codexLimitWindows(reply), [
+    { id: 'codex.primary', usedPercent: 29, windowMins: 10080, resetsAt: 1 },
+    { id: 'base_model_inference.primary', name: 'gpt-reserve', usedPercent: 90, windowMins: 300, resetsAt: 2, spent: true },
+    { id: 'base_model_inference.secondary', name: 'gpt-reserve', usedPercent: 40, windowMins: 10080, resetsAt: 3 },
+  ]);
+  assert.deepEqual(codexLimitWindows({ ordinaryUsageAllowed: false, rateLimits: { primary: { usedPercent: 100 } } }), [
+    { id: 'codex.primary', usedPercent: 100, windowMins: null, resetsAt: null, spent: true },
+  ]);
+  assert.deepEqual(codexLimitWindows(undefined), []);
 });
 
 test('buildSnapshot: full codex without rate limits omits the optional keys entirely', () => {
@@ -104,9 +132,7 @@ test('buildSnapshot: full codex without rate limits omits the optional keys enti
     codex: { today: 54321, summary: { lifetimeTokens: 12345678 } },
   });
   assert.deepEqual(snap.codex, { today: 54321, lifetime: 12345678 });
-  assert.ok(!('usedPercent' in snap.codex));
-  assert.ok(!('windowMins' in snap.codex));
-  assert.ok(!('resetsAt' in snap.codex));
+  assert.ok(!('windows' in snap.codex));
   assert.ok(!('planType' in snap.codex));
 });
 
@@ -165,7 +191,7 @@ test('CLI --stream --no-codex emits parseable snapshots with claude data and no 
   assert.ok(!('codex' in first));
 });
 
-test('CLI --stream with mock codex includes codex usage but no usedPercent', async () => {
+test('CLI --stream with mock codex includes codex usage but no limit windows', async () => {
   const { lines, stderr } = await collectStream(
     [
       '--interval', '0.3',
@@ -182,5 +208,5 @@ test('CLI --stream with mock codex includes codex usage but no usedPercent', asy
   assert.equal(withCodex.codex.lifetime, 12345678); // mock fixture lifetimeTokens
   // The mock rejects account/rateLimits/read (-32601); pollCodex swallows it,
   // so the snapshot must carry no rate-limit fields.
-  assert.ok(!('usedPercent' in withCodex.codex));
+  assert.ok(!('windows' in withCodex.codex));
 });

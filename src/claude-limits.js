@@ -53,20 +53,65 @@ const WINDOW_NAMES = new Map([
 ]);
 const WINDOW_ORDER = [...WINDOW_NAMES.keys()];
 
+const LIMIT_KINDS = new Map([
+  ['session', 'session'],
+  ['weekly_all', 'weekly'],
+]);
+
+// `severity` is the provider's own judgement with a loosely documented
+// vocabulary, so anything not plainly fine reads as spent — except `warning`,
+// which Claude raises while a limit still has room (seen at 76% used).
+const FINE_SEVERITIES = new Set(['normal', 'ok', 'none', 'healthy', 'warning', 'warn']);
+
+function isSpent(node) {
+  if (node.locked_reason != null) return true;
+  const severity = typeof node.severity === 'string' ? node.severity.toLowerCase() : null;
+  return severity !== null && !FINE_SEVERITIES.has(severity);
+}
+
+function window(name, percent, resetsAt, spent) {
+  return { name, usedPercent: Math.round(percent), resetsAt: resetsAt ?? null, ...(spent && { spent: true }) };
+}
+
 /**
  * Normalize the endpoint's response into ordered windows:
- * [{ name, usedPercent, resetsAt }]. Tolerates unknown keys — anything
- * object-shaped with a numeric `utilization` counts as a window.
+ * [{ name, usedPercent, resetsAt, spent? }].
+ *
+ * `limits[]` is the fuller answer: only it carries the per-model
+ * `weekly_scoped` windows, and the unknown top-level siblings of a reply that
+ * has it are placeholders (e.g. `nimbus_quill` at 0% with no reset). The
+ * top-level `five_hour` / `seven_day` objects are the fallback for a reply
+ * without the array; there anything object-shaped with a numeric
+ * `utilization` counts as a window.
  */
 export function normalizeLimits(raw) {
   if (!raw || typeof raw !== 'object') return [];
+  return Array.isArray(raw.limits) && raw.limits.length ? windowsFromLimits(raw.limits) : windowsFromKeys(raw);
+}
+
+function windowsFromLimits(limits) {
+  const windows = [];
+  for (const limit of limits) {
+    if (!limit || typeof limit !== 'object' || typeof limit.percent !== 'number') continue;
+    let name = LIMIT_KINDS.get(limit.kind);
+    if (limit.kind === 'weekly_scoped') {
+      const model = limit.scope?.model?.display_name;
+      if (typeof model !== 'string') continue;
+      name = `weekly ${model.toLowerCase()}`;
+    }
+    if (!name) continue;
+    windows.push(window(name, limit.percent, limit.resets_at, isSpent(limit)));
+  }
+  const rank = (w) => (w.name === 'session' ? 0 : w.name === 'weekly' ? 1 : 2);
+  return windows.sort((a, b) => rank(a) - rank(b));
+}
+
+function windowsFromKeys(raw) {
   const windows = [];
   for (const [key, value] of Object.entries(raw)) {
     if (!value || typeof value !== 'object' || typeof value.utilization !== 'number') continue;
     windows.push({
-      name: WINDOW_NAMES.get(key) ?? key.replaceAll('_', ' '),
-      usedPercent: Math.round(value.utilization),
-      resetsAt: value.resets_at ?? value.resetsAt ?? null,
+      ...window(WINDOW_NAMES.get(key) ?? key.replaceAll('_', ' '), value.utilization, value.resets_at ?? value.resetsAt, isSpent(value)),
       key,
     });
   }

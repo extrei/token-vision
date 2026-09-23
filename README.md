@@ -13,7 +13,7 @@ terminal and in a macOS menu-bar widget. Zero dependencies, read-only, local onl
 | | Claude Code | Codex |
 |---|---|---|
 | Today / lifetime tokens | from local transcripts | from `codex app-server` (plus a local same-day estimate, since the API lags) |
-| Plan limits | session / weekly windows with reset times | primary / secondary rate-limit windows |
+| Plan limits | session, weekly and per-model (Fable) windows with reset times; a locked limit is marked reached | every rate-limit window Codex reports, account-wide and per-model, by duration; a reached limit is marked |
 | Live rate | tokens per minute | tokens per minute per thread |
 | Per model | lifetime tokens per Claude model, split Claude Code / OMP | — |
 | Current sessions | every live Claude Code process (name, terminal / background, running / idle) and every active OMP session (tokens, cost, model) | every running thread, titled from Codex's own state DB: context used, tokens, model, running / idle |
